@@ -40,7 +40,7 @@ var detail_pos: Vector2 = Vector2.ZERO
 var weather_pos: Vector2 = Vector2.ZERO
 var sun_direction: Vector3 = Vector3(0, 1, 0)
 var moon_direction: Vector3 = Vector3(0, -1, 0)
-var coverage: float = 0.5
+var coverage: float = 0.25
 var cloud_type: float = 0.5
 var density: float = 0.05
 var absorption: float = 0.06
@@ -48,11 +48,14 @@ var detail_strength: float = 0.4
 var cloud_day_color: Color = Color.WHITE
 var cloud_horizon_color: Color = Color(1.0, 0.9, 0.8)
 var cloud_night_color: Color = Color(0.06, 0.08, 0.14)
-var use_weather: bool = false
+var use_weather: bool = true
 var current_time: float = 0.0
+var generated_weather_map: ImageTexture
 
 
 func initialize(p_texture_size: int = 768, p_frames: int = 64) -> void:
+	_generate_weather_map()
+
 	texture_size = p_texture_size
 	frames_to_update = p_frames
 
@@ -294,9 +297,8 @@ func _create_noise_uniform_set() -> RID:
 	u1.add_id(detail_rd)
 	uniforms.push_back(u1)
 
-	# 天氣圖
-	var weather = preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/weather.bmp")
-	var weather_rd = RenderingServer.texture_get_rd_texture(weather.get_rid())
+	# 天氣圖（自動生成）
+	var weather_rd = RenderingServer.texture_get_rd_texture(generated_weather_map.get_rid())
 	var u2 := RDUniform.new()
 	u2.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 	u2.binding = 2
@@ -305,3 +307,67 @@ func _create_noise_uniform_set() -> RID:
 	uniforms.push_back(u2)
 
 	return rd.uniform_set_create(uniforms, shader_rd, 1)
+
+
+func _generate_weather_map() -> void:
+	const MAP_SIZE := 512
+
+	# R：雲型 — 低頻，大片區域同一種雲
+	var type_noise := FastNoiseLite.new()
+	type_noise.noise_type = FastNoiseLite.TYPE_CELLULAR
+	type_noise.frequency = 0.004
+	type_noise.seed = 42
+	type_noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
+
+	# B：覆蓋率 — 用 cellular 噪音產生明確的雲團/晴天分界
+	var cov_noise := FastNoiseLite.new()
+	cov_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	cov_noise.frequency = 0.005
+	cov_noise.seed = 123
+	cov_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+	cov_noise.fractal_octaves = 4
+
+	# 大尺度遮罩：決定哪裡是大片晴天
+	var mask_noise := FastNoiseLite.new()
+	mask_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	mask_noise.frequency = 0.0015
+	mask_noise.seed = 789
+
+	# G：降水
+	var precip_noise := FastNoiseLite.new()
+	precip_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	precip_noise.frequency = 0.005
+	precip_noise.seed = 456
+
+	var img := Image.create(MAP_SIZE, MAP_SIZE, false, Image.FORMAT_RGB8)
+
+	for y in MAP_SIZE:
+		for x in MAP_SIZE:
+			var fx := float(x)
+			var fy := float(y)
+
+			# R：雲型 — cellular noise 給每個區塊一個隨機值
+			# 量化到四段讓四種雲型都有機會出現
+			var type_raw := type_noise.get_noise_2d(fx, fy) * 0.5 + 0.5
+			var type_quantized := floorf(type_raw * 4.0) / 4.0
+			# 保留區塊內的微小變化（不要完全硬切）
+			var type_frac := fmod(type_raw * 4.0, 1.0) * 0.2
+			var type_val := clampf(type_quantized + type_frac, 0.0, 1.0)
+
+			# B：覆蓋率 — 兩層混合後做強力 smoothstep
+			var cov_detail := cov_noise.get_noise_2d(fx, fy) * 0.5 + 0.5
+			var mask := mask_noise.get_noise_2d(fx, fy) * 0.5 + 0.5
+			var cov_raw := mask * 0.6 + cov_detail * 0.4
+			# 強力對比：0.3 以下全切、0.6 以上全開
+			var t := clampf((cov_raw - 0.3) / 0.3, 0.0, 1.0)
+			var cov_val := t * t * (3.0 - 2.0 * t)
+			# 再做一次讓邊界更銳利
+			t = clampf(cov_val, 0.0, 1.0)
+			cov_val = t * t * (3.0 - 2.0 * t)
+
+			# G：降水
+			var precip_val := (precip_noise.get_noise_2d(fx, fy) * 0.5 + 0.5) * cov_val
+
+			img.set_pixel(x, y, Color(type_val, precip_val, cov_val))
+
+	generated_weather_map = ImageTexture.create_from_image(img)

@@ -1117,7 +1117,7 @@ func _check_cloud_processing() -> void:
 
 @export_subgroup("Density")
 
-@export_range(0.0, 1.0, 0.01) var vol_coverage: float = 0.5:
+@export_range(0.0, 1.0, 0.01) var vol_coverage: float = 0.25:
 	set(value):
 		vol_coverage = value
 		if _vol_renderer:
@@ -1154,8 +1154,8 @@ func _check_cloud_processing() -> void:
 
 @export_subgroup("Weather")
 
-## 天氣圖（2D: R=雲型, G=降水, B=覆蓋率）
-@export var vol_weather_map: bool = false:
+## 啟用天氣圖（自動生成，控制雲型和覆蓋率的空間分布）
+@export var vol_weather_map: bool = true:
 	set(value):
 		vol_weather_map = value
 		if _vol_renderer:

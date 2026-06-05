@@ -43,13 +43,13 @@ layout(push_constant, std430) uniform Params {
 // 球體常數
 const float GROUND_RADIUS = 6000000.0;
 const float SKY_B_RADIUS = 6001500.0;
-const float SKY_T_RADIUS = 6004000.0;
+const float SKY_T_RADIUS = 6006000.0;
 const float PI = 3.141592;
 
 // 噪音尺度
 const float BASE_SCALE = 0.00008;
 const float DETAIL_SCALE = 0.001;
-const float WEATHER_SCALE = 0.00006;
+const float WEATHER_SCALE = 0.0002;
 
 // ============================================================================
 // 工具函數
@@ -89,13 +89,21 @@ float get_height_fraction(float altitude) {
 // ============================================================================
 
 vec4 mix_gradients(float cloud_t) {
-	const vec4 STRATUS = vec4(0.02, 0.05, 0.09, 0.11);
-	const vec4 STRATOCUMULUS = vec4(0.02, 0.2, 0.48, 0.625);
-	const vec4 CUMULUS = vec4(0.01, 0.0625, 0.78, 1.0);
-	float s = 1.0 - clamp(cloud_t * 2.0, 0.0, 1.0);
-	float sc = 1.0 - abs(cloud_t - 0.5) * 2.0;
-	float c = clamp(cloud_t - 0.5, 0.0, 1.0) * 2.0;
-	return STRATUS * s + STRATOCUMULUS * sc + CUMULUS * c;
+	// x,y = 底部 smoothstep 邊界, z,w = 頂部 smoothstep 邊界
+	const vec4 STRATUS = vec4(0.02, 0.06, 0.10, 0.13);          // 極薄扁平
+	const vec4 STRATOCUMULUS = vec4(0.02, 0.15, 0.40, 0.55);    // 中等厚度
+	const vec4 CUMULUS = vec4(0.01, 0.08, 0.70, 0.90);          // 蓬鬆高塔
+	const vec4 CUMULONIMBUS = vec4(0.005, 0.03, 0.92, 1.0);     // 暴風雨巨塔，幾乎填滿雲層
+
+	// 四段混合：0~0.33 層雲↔層積雲, 0.33~0.66 層積雲↔積雲, 0.66~1.0 積雲↔積雨雲
+	float t = cloud_t * 3.0;
+	if (t < 1.0) {
+		return mix(STRATUS, STRATOCUMULUS, t);
+	} else if (t < 2.0) {
+		return mix(STRATOCUMULUS, CUMULUS, t - 1.0);
+	} else {
+		return mix(CUMULUS, CUMULONIMBUS, t - 2.0);
+	}
 }
 
 float density_height_gradient(float height_frac, float cloud_t) {
@@ -138,6 +146,36 @@ float sample_density(vec3 pip, vec3 weather, float mip) {
 	base_cloud = remap(base_cloud, hfbm * params.detail_strength * height_fraction, 1.0, 0.0, 1.0);
 
 	return pow(clamp(base_cloud, 0.0, 1.0), (1.0 - height_fraction) * 0.8 + 0.5);
+}
+
+// ============================================================================
+// 八面體映射
+// ============================================================================
+
+vec2 oct_wrap(vec2 v) {
+	vec2 signVal;
+	signVal.x = v.x >= 0.0 ? 1.0 : -1.0;
+	signVal.y = v.y >= 0.0 ? 1.0 : -1.0;
+	return (1.0 - abs(v.yx)) * signVal;
+}
+
+vec2 vec3_to_oct(vec3 e) {
+	e /= abs(e.x) + abs(e.y) + abs(e.z);
+	e.xy = e.z >= 0.0 ? e.xy : oct_wrap(e.xy);
+	vec2 n;
+	n.y = e.y * 0.5 + 0.5;
+	n.x = e.x * 0.5 + n.y;
+	n.y = e.x * -0.5 + n.y;
+	return n;
+}
+
+vec3 oct_to_vec3(vec2 e) {
+	vec3 n;
+	n.x = (e.x - e.y);
+	n.y = (e.x + e.y) - 1.0;
+	n.z = 1.0 - abs(n.x) - abs(n.y);
+	n.xy = n.z >= 0.0 ? n.xy : oct_wrap(n.xy);
+	return normalize(n);
 }
 
 // ============================================================================
@@ -184,16 +222,18 @@ vec4 march(vec3 pos, vec3 end, vec3 dir, int depth) {
 	vec3 ambient_top = sun_color * 0.15;
 	vec3 ambient_bottom = sun_color * 0.08;
 
+	// 天氣圖用光線方向取樣（不用世界座標，天空各方向均勻分布）
+	vec2 weather_uv = vec3_to_oct(dir.xzy) + params.weather_pos;
+	vec3 weather_sample;
+	if (params.use_weather > 0.5) {
+		weather_sample = texture(weather_noise, weather_uv).rgb;
+	} else {
+		weather_sample = vec3(params.cloud_type, 0.5, 1.0);
+	}
+
 	for (int i = 0; i < depth; i++) {
 		p += dir * ss;
 		float height_fraction = get_height_fraction(length(p));
-
-		vec3 weather_sample;
-		if (params.use_weather > 0.5) {
-			weather_sample = texture(weather_noise, p.xz * WEATHER_SCALE + 0.5 + params.weather_pos).rgb;
-		} else {
-			weather_sample = vec3(params.cloud_type, 0.5, 1.0);
-		}
 
 		float t = sample_density(p, weather_sample, 0.0);
 		float dt = exp(-params.density * t * ss);
@@ -204,25 +244,13 @@ vec4 march(vec3 pos, vec3 end, vec3 dir, int depth) {
 
 			for (int j = 0; j < 6; j++) {
 				lp += (ldir + RANDOM_VECTORS[j] * float(j)) * lss;
-				vec3 lweather;
-				if (params.use_weather > 0.5) {
-					lweather = texture(weather_noise, lp.xz * WEATHER_SCALE + 0.5 + params.weather_pos).rgb;
-				} else {
-					lweather = vec3(params.cloud_type, 0.5, 1.0);
-				}
-				cd += sample_density(lp, lweather, float(j));
+				cd += sample_density(lp, weather_sample, float(j));
 			}
 
 			// 遠距取樣
 			lp = p + ldir * 18.0 * lss;
-			vec3 lweather;
-			if (params.use_weather > 0.5) {
-				lweather = texture(weather_noise, lp.xz * WEATHER_SCALE + 0.5 + params.weather_pos).rgb;
-			} else {
-				lweather = vec3(params.cloud_type, 0.5, 1.0);
-			}
 			float lh = get_height_fraction(length(lp));
-			float lt = pow(sample_density(lp, lweather, 5.0), (1.0 - lh) * 0.8 + 0.5);
+			float lt = pow(sample_density(lp, weather_sample, 5.0), (1.0 - lh) * 0.8 + 0.5);
 			cd += lt;
 
 			// Beer-Lambert + 粉末效應
@@ -240,26 +268,6 @@ vec4 march(vec3 pos, vec3 end, vec3 dir, int depth) {
 	}
 
 	return vec4(L, clamp(alpha, 0.0, 1.0));
-}
-
-// ============================================================================
-// 八面體映射
-// ============================================================================
-
-vec2 oct_wrap(vec2 v) {
-	vec2 signVal;
-	signVal.x = v.x >= 0.0 ? 1.0 : -1.0;
-	signVal.y = v.y >= 0.0 ? 1.0 : -1.0;
-	return (1.0 - abs(v.yx)) * signVal;
-}
-
-vec3 oct_to_vec3(vec2 e) {
-	vec3 n;
-	n.x = (e.x - e.y);
-	n.y = (e.x + e.y) - 1.0;
-	n.z = 1.0 - abs(n.x) - abs(n.y);
-	n.xy = n.z >= 0.0 ? n.xy : oct_wrap(n.xy);
-	return normalize(n);
 }
 
 // ============================================================================

@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://k2k8snykaksf"
+path="res://.godot/imported/VolumetricCloudsCompute.glsl-3ae3b381809d210c362d2179ba5f40a5.res"
+
+[deps]
+
+source_file="res://addons/sky_3d/shaders/VolumetricCloudsCompute.glsl"
+dest_files=["res://.godot/imported/VolumetricCloudsCompute.glsl-3ae3b381809d210c362d2179ba5f40a5.res"]
+
+[params]
+

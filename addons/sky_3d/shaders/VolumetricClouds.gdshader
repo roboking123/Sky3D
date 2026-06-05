@@ -1,5 +1,7 @@
 // Copyright (c) 2023-2025 Cory Petkovsek and Contributors
 // Volumetric Clouds
+// 噪音取樣參考 clayjohn/godot-volumetric-cloud-demo-v2 (MIT)
+// 層級 remap 參考 Bonkahe/SunshineClouds2 (MIT)
 
 shader_type spatial;
 render_mode blend_mix, cull_disabled, unshaded, depth_draw_never;
@@ -8,129 +10,99 @@ render_mode blend_mix, cull_disabled, unshaded, depth_draw_never;
 // UNIFORMS
 // ============================================================================
 
-// Sky integration
 uniform vec2 color_correction = vec2(0.0, 1.0);
 uniform vec3 sun_direction = vec3(0.0, 0.5, 0.5);
 uniform vec3 moon_direction = vec3(0.0, -0.5, 0.5);
 
-// Cloud layer geometry
-uniform float cloud_bottom : hint_range(0.01, 0.15) = 0.05;
-uniform float cloud_top : hint_range(0.05, 0.5) = 0.4;
+// 密度
+uniform float coverage : hint_range(0.0, 1.0) = 0.5;
+uniform float cloud_type : hint_range(0.0, 1.0) = 0.5;
+uniform float density_mult : hint_range(0.1, 5.0) = 1.0;
+uniform float absorption : hint_range(0.01, 0.5) = 0.06;
 
-// Density
-uniform float coverage : hint_range(0.0, 1.0) = 0.45;
-uniform float cloud_type : hint_range(0.0, 1.0) = 0.5;  // 0=stratus, 0.5=cumulus, 1=cumulonimbus
-uniform float density_mult : hint_range(0.1, 3.0) = 1.0;
-uniform float absorption : hint_range(0.01, 0.3) = 0.06;
+// 噪音貼圖
+uniform sampler3D base_noise_texture : filter_linear_mipmap, repeat_enable;
+uniform sampler3D detail_noise_texture : filter_linear_mipmap, repeat_enable;
+uniform float detail_strength : hint_range(0.0, 1.0) = 0.4;
 
-// Noise
-uniform float base_scale : hint_range(1.0, 30.0) = 7.0;
+// 天氣圖
+uniform sampler2D weather_map : filter_linear_mipmap, repeat_enable;
+uniform bool use_weather_map = false;
 
-// Animation
-uniform float wind_direction : hint_range(-180.0, 180.0) = 0.0;
-uniform float wind_speed : hint_range(0.0, 0.1) = 0.01;
+// 動畫
+uniform vec2 cloud_pos = vec2(0.0);
+uniform vec2 detail_pos = vec2(0.0);
+uniform vec2 weather_pos = vec2(0.0);
 
-// Quality
-uniform int march_steps : hint_range(16, 128) = 64;
-uniform int shadow_steps : hint_range(2, 16) = 6;
+// 品質
+uniform int march_steps : hint_range(16, 128) = 32;
+uniform int shadow_steps : hint_range(2, 16) = 4;
 
-// Colors
+// 顏色
 uniform vec4 cloud_day_color : source_color = vec4(1.0, 1.0, 1.0, 1.0);
 uniform vec4 cloud_horizon_color : source_color = vec4(1.0, 0.9, 0.8, 1.0);
 uniform vec4 cloud_night_color : source_color = vec4(0.06, 0.08, 0.14, 1.0);
-
-// Future: 3D noise texture support
-uniform sampler3D cloud_noise_texture : filter_linear_mipmap, repeat_enable;
-uniform bool use_noise_texture = false;
 
 uniform sampler2D DEPTH_TEXTURE : hint_depth_texture, filter_linear_mipmap;
 
 #include "res://addons/sky_3d/shaders/Common.gdshaderinc"
 
 // ============================================================================
-// NOISE FUNCTIONS
+// 球體幾何常數（跟 clayjohn 一致）
 // ============================================================================
 
-float hash13(vec3 p) {
-	p = mod(p, 289.0); //cheap tiling
-	p = fract(p * 0.1031);
-	p += dot(p, p.zyx + 31.32);
-	return fract((p.x + p.y) * p.z);
+const float GROUND_RADIUS = 6000000.0;
+const float SKY_B_RADIUS = 6001500.0;
+const float SKY_T_RADIUS = 6004000.0;
+
+// clayjohn 的噪音取樣尺度
+const float BASE_NOISE_SCALE = 0.00008;
+const float DETAIL_NOISE_SCALE = 0.001;
+const float WEATHER_SCALE = 0.00006;
+
+// ============================================================================
+// 工具函數
+// ============================================================================
+
+float remap(float value, float old_min, float old_max, float new_min, float new_max) {
+	return new_min + (((value - old_min) / (old_max - old_min)) * (new_max - new_min));
 }
 
-float value_noise(vec3 p) {
-	vec3 i = floor(p);
-	vec3 f = fract(p);
-	f = f * f * (3.0 - 2.0 * f);
-
-	return mix(
-		mix(
-			mix(hash13(i + vec3(0, 0, 0)), hash13(i + vec3(1, 0, 0)), f.x),
-			mix(hash13(i + vec3(0, 1, 0)), hash13(i + vec3(1, 1, 0)), f.x),
-			f.y
-		),
-		mix(
-			mix(hash13(i + vec3(0, 0, 1)), hash13(i + vec3(1, 0, 1)), f.x),
-			mix(hash13(i + vec3(0, 1, 1)), hash13(i + vec3(1, 1, 1)), f.x),
-			f.y
-		),
-		f.z
-	);
+float intersect_sphere(vec3 pos, vec3 dir, float r) {
+	float a = dot(dir, dir);
+	float b = 2.0 * dot(dir, pos);
+	float c = dot(pos, pos) - (r * r);
+	float d = sqrt((b * b) - 4.0 * a * c);
+	float p = -b - d;
+	float p2 = -b + d;
+	return max(p, p2) / (2.0 * a);
 }
 
-float cloud_fbm(vec3 p) {
-	float v = 0.0;
-	v += 0.5 * value_noise(p);
-	v += 0.25 * value_noise(p * 2.0);
-	v += 0.125 * value_noise(p * 4.0);
-	v += 0.0625 * value_noise(p * 8.0);
-	return v;
-}
-
-// Future: sample from baked 3D texture
-float sample_cloud_texture(vec3 p) {
-	vec4 noise = texture(cloud_noise_texture, p);
-	return noise.r * 0.625 + noise.g * 0.25 + noise.b * 0.125;
+float get_height_fraction(float altitude) {
+	return clamp((altitude - SKY_B_RADIUS) / (SKY_T_RADIUS - SKY_B_RADIUS), 0.0, 1.0);
 }
 
 // ============================================================================
-// HEIGHT GRADIENTS
+// 高度梯度
 // ============================================================================
 
-float gradient_stratus(float h) {
-	return smoothstep(0.0, 0.05, h) * smoothstep(0.2, 0.1, h);
+vec4 mix_gradients(float cloud_t) {
+	const vec4 STRATUS = vec4(0.02, 0.05, 0.09, 0.11);
+	const vec4 STRATOCUMULUS = vec4(0.02, 0.2, 0.48, 0.625);
+	const vec4 CUMULUS = vec4(0.01, 0.0625, 0.78, 1.0);
+	float stratus = 1.0 - clamp(cloud_t * 2.0, 0.0, 1.0);
+	float stratocumulus = 1.0 - abs(cloud_t - 0.5) * 2.0;
+	float cumulus = clamp(cloud_t - 0.5, 0.0, 1.0) * 2.0;
+	return STRATUS * stratus + STRATOCUMULUS * stratocumulus + CUMULUS * cumulus;
 }
 
-float gradient_stratocumulus(float h) {
-	return smoothstep(0.0, 0.1, h) * smoothstep(0.5, 0.25, h);
-}
-
-float gradient_cumulus(float h) {
-	float base = smoothstep(0.0, 0.1, h);
-	float top = smoothstep(1.0, 0.4, h);
-	float body = pow(smoothstep(0.0, 0.35, h) * smoothstep(0.85, 0.25, h), 0.5);
-	return base * top * body;
-}
-
-float gradient_cumulonimbus(float h) {
-	float base = smoothstep(0.0, 0.05, h);
-	float tower = smoothstep(1.0, 0.8, h);
-	return base * tower * pow(h * 0.4 + 0.1, 0.25);
-}
-
-float sample_height_gradient(float h, float type) {
-	float t = type * 3.0;
-	if (t < 1.0) {
-		return mix(gradient_stratus(h), gradient_stratocumulus(h), t);
-	} else if (t < 2.0) {
-		return mix(gradient_stratocumulus(h), gradient_cumulus(h), t - 1.0);
-	} else {
-		return mix(gradient_cumulus(h), gradient_cumulonimbus(h), t - 2.0);
-}
+float density_height_gradient(float height_frac, float cloud_t) {
+	vec4 g = mix_gradients(cloud_t);
+	return smoothstep(g.x, g.y, height_frac) - smoothstep(g.z, g.w, height_frac);
 }
 
 // ============================================================================
-// LIGHTING
+// 光照
 // ============================================================================
 
 float beer_lambert(float od) {
@@ -138,114 +110,147 @@ float beer_lambert(float od) {
 }
 
 // ============================================================================
-// DENSITY SAMPLING
+// 密度取樣
 // ============================================================================
 
-float sample_density(vec3 pos, vec3 wind_offset) {
-	float h = (pos.y - cloud_bottom) / (cloud_top - cloud_bottom);
-	h = clamp(h, 0.0, 1.0);
+float sample_density(vec3 pip, vec3 weather_sample, float mip) {
+	vec3 p = pip;
+	float height_fraction = get_height_fraction(length(p));
 
-	float gradient = sample_height_gradient(h, cloud_type);
+	// 基底風偏移
+	p.xz += 20.0 * cloud_pos * 0.6;
 
-	vec3 sample_pos = pos * base_scale + wind_offset;
+	// 取樣基底噪音
+	vec4 n = textureLod(base_noise_texture, p.xyz * BASE_NOISE_SCALE, mip - 2.0);
+	float fbm = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
 
-	float base;
-	if (use_noise_texture) {
-		base = sample_cloud_texture(sample_pos);
-	} else {
-		base = cloud_fbm(sample_pos);
-}
+	// 高度梯度 + 覆蓋率
+	float g = density_height_gradient(height_fraction, weather_sample.r);
+	float base_cloud = remap(n.r, -(1.0 - fbm), 1.0, 0.0, 1.0);
+	float weather_coverage = coverage * weather_sample.b;
+	base_cloud = remap(base_cloud * g, 1.0 - weather_coverage, 1.0, 0.0, 1.0);
+	base_cloud *= weather_coverage;
 
-	float threshold = 1.0 - coverage;
-	float d = base - threshold;
-	d = max(d, 0.0) * (1.0 / max(coverage, 0.01));
-	d *= gradient;
+	if (base_cloud <= 0.01) return 0.0;
 
-	return max(d, 0.0) * density_mult;
-}
+	// 細節風偏移
+	p.xz -= detail_pos * 40.0;
+	p.y -= TIME * 40.0;
 
-// ============================================================================
-// SHADOW RAY
-// ============================================================================
+	// 細節侵蝕
+	vec3 hn = textureLod(detail_noise_texture, p * DETAIL_NOISE_SCALE, mip).rgb;
+	float hfbm = hn.r * 0.625 + hn.g * 0.25 + hn.b * 0.125;
+	hfbm = mix(hfbm, 1.0 - hfbm, clamp(height_fraction * 4.0, 0.0, 1.0));
+	base_cloud = remap(base_cloud, hfbm * detail_strength * height_fraction, 1.0, 0.0, 1.0);
 
-float shadow_ray(vec3 pos, vec3 light_dir, vec3 wind_offset) {
-	float od = 0.0;
-	float layer_height = cloud_top - pos.y;
-
-	if (layer_height <= 0.0) return 1.0;
-
-		float step_size = layer_height / float(shadow_steps);
-
-		for (int i = 1; i <= shadow_steps; i++) {
-			vec3 p = pos + vec3(0.0, step_size * float(i), 0.0);
-			float d = sample_density(p, wind_offset);
-			od += d * 50.0;
-		}
-	return beer_lambert(od);
+	return pow(clamp(base_cloud, 0.0, 1.0), (1.0 - height_fraction) * 0.8 + 0.5) * density_mult;
 }
 
 // ============================================================================
-// RAY MARCH
+// 光線步進
 // ============================================================================
 
-vec4 march_clouds(vec3 rd, vec3 sun_dir, float time, vec2 screen_uv) {
-	if (rd.y <= 0.001) return vec4(0.0);
-		float t_min = cloud_bottom / rd.y;
-		float t_max = cloud_top / rd.y;
-		if (t_min >= t_max) return vec4(0.0);
-		vec2 wind_dir = vec2(sin(wind_direction), cos(wind_direction));
-		vec3 wind_offset = vec3(wind_dir.x, 0.0, wind_dir.y) * time * wind_speed;
-		float step_size = (t_max - t_min) / float(march_steps);
-		float t = t_min;
+vec4 march_clouds(vec3 dir, vec3 sun_dir, vec2 screen_uv) {
+	if (dir.y <= 0.0) return vec4(0.0);
 
-		// Jitter to reduce banding
-		vec2 screen_pos = screen_uv * vec2(textureSize(DEPTH_TEXTURE, 0));
-		float jitter = fract(52.9829189 * fract(dot(screen_pos, vec2(0.06711056, 0.00583715))));
-		t += step_size * jitter;
+	vec3 cam_pos = vec3(0.0, GROUND_RADIUS, 0.0);
+	float t_min = intersect_sphere(cam_pos, dir, SKY_B_RADIUS);
+	float t_max = intersect_sphere(cam_pos, dir, SKY_T_RADIUS);
+	if (t_min < 0.0 || t_max < 0.0 || t_min >= t_max) return vec4(0.0);
 
-		// Cloud color based on sun height
-		float sun_height = sun_dir.y;
-		float day_amount = smoothstep(-0.1, 0.3, sun_height);      // 1 when day
-		float night_amount = smoothstep(0.1, -0.5, sun_height);    // 1 when night
-		float horizon_amount = 1.0 - day_amount - night_amount;    // remainder is horizon
-		horizon_amount = max(horizon_amount, 0.0);
+	float shell_dist = t_max - t_min;
+	float step_size = shell_dist / float(march_steps);
+	float t_dist = SKY_T_RADIUS - SKY_B_RADIUS;
+	float light_step = t_dist / 64.0;
+	vec3 ldir = normalize(sun_dir);
 
-		vec3 col = cloud_day_color.rgb * day_amount + cloud_horizon_color.rgb * horizon_amount + cloud_night_color.rgb * night_amount;
-		
-		float transmittance = 1.0;
-		vec3 light = vec3(0.0);
+	// 抖動
+	vec3 start_pos = cam_pos + dir * t_min;
+	float hash_val = fract(dot(screen_uv, vec2(12.9898, 78.233)));
+	hash_val = fract(hash_val * 43758.5453);
+	vec3 p = start_pos + dir * hash_val * step_size;
+
+	float transmittance = 1.0;
+	float alpha = 0.0;
+	vec3 light_accum = vec3(0.0);
+
+	// 日夜顏色
+	float sun_height = sun_dir.y;
+	float day_amount = smoothstep(-0.1, 0.3, sun_height);
+	float night_amount = smoothstep(0.1, -0.5, sun_height);
+	float horizon_amount = max(1.0 - day_amount - night_amount, 0.0);
+	vec3 col = cloud_day_color.rgb * day_amount + cloud_horizon_color.rgb * horizon_amount + cloud_night_color.rgb * night_amount;
+
+	// Henyey-Greenstein 相位函數
+	float cos_theta = dot(ldir, dir);
+	float phase = max(
+		max(
+			(0.0795774715459 * (1.0 - 0.36) / pow(1.0 + 0.36 - 1.2 * cos_theta, 1.5)),
+			(0.0795774715459 * (1.0 - 0.04) / pow(1.0 + 0.04 + 0.4 * cos_theta, 1.5))
+		),
+		(0.0795774715459 * (1.0 - 0.0196) / pow(1.0 + 0.0196 - 2.0 * (-0.14) * cos_theta, 1.5))
+	);
+
+	// 隨機光線取樣方向（clayjohn 做法）
+	const vec3 RANDOM_VECTORS[6] = {
+		vec3(0.38051305, 0.92453449, -0.02111345),
+		vec3(-0.50625799, -0.03590792, -0.86163418),
+		vec3(-0.32509218, -0.94557439, 0.01428793),
+		vec3(0.09026238, -0.27376545, 0.95755165),
+		vec3(0.28128598, 0.42443639, -0.86065785),
+		vec3(-0.16852403, 0.14748697, 0.97460106)
+	};
 
 	for (int i = 0; i < march_steps; i++) {
-		if (t > t_max) break;
-		if (transmittance < 0.01) break;
+		p += dir * step_size;
+		float height_fraction = get_height_fraction(length(p));
 
-		vec3 pos = rd * t;
-		float d = sample_density(pos, wind_offset);
+		// 天氣圖取樣
+		vec3 weather;
+		if (use_weather_map) {
+			weather = texture(weather_map, p.xz * WEATHER_SCALE + 0.5 + weather_pos).rgb;
+		} else {
+			weather = vec3(cloud_type, 0.5, 1.0);
+		}
 
-		if (d > 0.001) {
-			
-			float od = d * absorption * 20.0;
-			float beer = beer_lambert(od);
-			
-			//sun light
-			float sun_factor = clamp(sun_dir.y + 0.3, 0.0, 1.0);
-			float sun_shadow = shadow_ray(pos, sun_dir, wind_offset);
-			
-			//moon light
-			float moon_factor = clamp(-sun_dir.y + 0.3, 0.0, 1.0) * 0.3;
-			float moon_shadow = shadow_ray(pos,moon_direction , wind_offset);
-			
-			vec3 ambient = col * 0.3;
-			vec3 sun_light = col * sun_shadow * sun_factor * 0.7;
-			vec3 moon_light = col * moon_shadow * moon_factor;
-			vec3 sample_light = (ambient + sun_light + moon_light) * (1.0 - beer);
+		float d = sample_density(p, weather, 0.0);
+		float dt = exp(-absorption * d * step_size);
 
-			light += transmittance * sample_light;
-			transmittance *= beer;
+		if (d > 0.0) {
+			// 光照光線
+			vec3 lp = p;
+			float cd = 0.0;
+			for (int j = 0; j < shadow_steps; j++) {
+				lp += (ldir + RANDOM_VECTORS[j] * float(j)) * light_step;
+				float lheight = get_height_fraction(length(lp));
+				vec3 lweather;
+				if (use_weather_map) {
+					lweather = texture(weather_map, lp.xz * WEATHER_SCALE + 0.5 + weather_pos).rgb;
+				} else {
+					lweather = vec3(cloud_type, 0.5, 1.0);
+				}
+				cd += sample_density(lp, lweather, float(j));
 			}
-		t += step_size;
+
+			// Beer-Lambert + 粉末效應
+			float beers = exp(-absorption * cd * light_step * 3.0);
+			float powder = 1.0 - exp(-absorption * cd * light_step * 3.0 * 2.0);
+			float beers_total = 2.0 * beers * powder;
+
+			// 環境光（高處用天空色，低處用地面反射）
+			float sun_factor = clamp(sun_dir.y + 0.3, 0.0, 1.0);
+			vec3 ambient = col * 0.15;
+			vec3 radiance = (ambient + beers_total * col * sun_factor * phase) * d;
+
+			alpha += (1.0 - dt) * (1.0 - alpha);
+			light_accum += transmittance * (radiance - radiance * dt) / max(0.0000001, d);
+			transmittance *= dt;
+		}
+
+		if (alpha >= 0.99) break;
 	}
-	return vec4(light, 1.0 - transmittance);
+
+	return vec4(light_accum, clamp(alpha, 0.0, 1.0));
 }
 
 // ============================================================================
@@ -261,27 +266,19 @@ void vertex() {
 
 void fragment() {
 	float depth_raw = textureLod(DEPTH_TEXTURE, SCREEN_UV, 0.0).r;
-	
 
-	// MSAA fix based on merge: https://github.com/Bonkahe/SunshineClouds2/pull/16
 	vec2 texel = 1.0 / vec2(textureSize(DEPTH_TEXTURE, 0));
 	float depth_l = textureLod(DEPTH_TEXTURE, SCREEN_UV + vec2(-texel.x, 0.0), 0.0).r;
 	float depth_r = textureLod(DEPTH_TEXTURE, SCREEN_UV + vec2(texel.x, 0.0), 0.0).r;
 	float depth_u = textureLod(DEPTH_TEXTURE, SCREEN_UV + vec2(0.0, texel.y), 0.0).r;
 	float depth_d = textureLod(DEPTH_TEXTURE, SCREEN_UV + vec2(0.0, -texel.y), 0.0).r;
-
-	// In reversed-Z: sky=0, objects>0. Max gives most conservative (object-favoring) value
 	float depth_max = max(depth_raw, max(max(depth_l, depth_r), max(depth_u, depth_d)));
-
 	float depth_fade = smoothstep(0.0001, 0.0, depth_max);
-	
-	// Only render on sky (reversed depth buffer) smoothed to prevent object outline
+
 	if (depth_fade < 0.00001) {
 		discard;
 	}
 
-
-	// Reconstruct view direction
 	vec3 ndc = vec3(SCREEN_UV * 2.0 - 1.0, depth_raw);
 	vec4 view = INV_PROJECTION_MATRIX * vec4(ndc, 1.0);
 	view.xyz /= view.w;
@@ -292,8 +289,7 @@ void fragment() {
 
 	vec3 rd = normalize(world_view.xyz);
 
-	// March clouds
-	vec4 clouds = march_clouds(rd, sun_direction, TIME, SCREEN_UV);
+	vec4 clouds = march_clouds(rd, sun_direction, SCREEN_UV);
 	clouds.rgb = apply_photo_tonemap(clouds.rgb, color_correction.y, color_correction.x);
 
 	ALBEDO = clouds.rgb;

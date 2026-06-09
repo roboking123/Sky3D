@@ -248,6 +248,7 @@ compute_shader = ExtResource("9_2tg77")
 post_pass_compute_shader = ExtResource("16_3vwit")
 cloud_ambient_color = Color(0.761, 0.784, 0.824, 1)
 cloud_ambient_tint = Color(0.58, 0.6, 0.62, 1)
+ambient_occlusion_color = Color(0.45, 0.47, 0.52, 1)
 wind_direction = Vector3(1, 0, 1)
 directional_lights_data = Array[Vector4]([Vector4(0.29551914, 0.7307851, 0.61532235, 12), Vector4(1, 1, 1, 1), Vector4(0.9928705, -0.11430087, -0.033815037, 6), Vector4(0.572549, 0.776471, 0.956863, 0)])
 

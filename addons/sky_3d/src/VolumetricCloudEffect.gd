@@ -8,11 +8,16 @@ class_name VolumetricCloudEffect
 extends CompositorEffect
 
 const COMPOSITE_SHADER_PATH := "res://addons/sky_3d/shaders/VolumetricCloudsComposite.glsl"
-const SCENE_DATA_INC_PATH := "res://addons/sky_3d/shaders/CloudsSceneData.comp"
+const COMPOSITE_SHADER_MSAA_PATH := "res://addons/sky_3d/shaders/VolumetricCloudsComposite.msaa.glsl"
 
 var rd: RenderingDevice
-var composite_shader: RID = RID()
+var composite_shader: RID = RID()         # 非 MSAA 變體
 var composite_pipeline: RID = RID()
+var composite_shader_msaa: RID = RID()    # MSAA 變體（寫 image2DMS 逐樣本）
+var composite_pipeline_msaa: RID = RID()
+var _msaa_active: bool = false            # 當前這次重建用的是 MSAA 變體嗎
+var _last_msaa_on: bool = false           # 上次 callback 的 MSAA 狀態，變了要重建
+var _msaa_warn_logged: bool = false       # MSAA set 失效診斷只報一次
 
 # 取樣器
 var linear_sampler: RID = RID()
@@ -93,6 +98,14 @@ func _cleanup_compute() -> void:
 			rd.free_rid(composite_shader)
 		composite_shader = RID()
 
+		if composite_pipeline_msaa.is_valid():
+			rd.free_rid(composite_pipeline_msaa)
+		composite_pipeline_msaa = RID()
+
+		if composite_shader_msaa.is_valid():
+			rd.free_rid(composite_shader_msaa)
+		composite_shader_msaa = RID()
+
 		if linear_sampler.is_valid():
 			rd.free_rid(linear_sampler)
 		linear_sampler = RID()
@@ -138,26 +151,15 @@ func _initialize_compute() -> void:
 	nearest_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
 	nearest_sampler = rd.sampler_create(nearest_state)
 
-	# 載入合成 shader
-	var shader_file := load(COMPOSITE_SHADER_PATH) as RDShaderFile
-	if not shader_file:
-		enabled = false
-		printerr("VolumetricCloudEffect: 找不到合成 shader")
-		return
-
-	var spirv := shader_file.get_spirv()
-	var compile_err: String = spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
-	if compile_err != "":
-		enabled = false
-		printerr("VolumetricCloudEffect: Composite shader 編譯失敗:\n", compile_err)
-		return
-	composite_shader = rd.shader_create_from_spirv(spirv)
+	# 載入兩個合成 shader 變體（非 MSAA / MSAA）
+	composite_shader = _load_composite_shader(COMPOSITE_SHADER_PATH, "非 MSAA")
+	composite_shader_msaa = _load_composite_shader(COMPOSITE_SHADER_MSAA_PATH, "MSAA")
 	if not composite_shader.is_valid():
 		enabled = false
-		printerr("VolumetricCloudEffect: shader_create_from_spirv 失敗")
 		return
-
 	composite_pipeline = rd.compute_pipeline_create(composite_shader)
+	if composite_shader_msaa.is_valid():
+		composite_pipeline_msaa = rd.compute_pipeline_create(composite_shader_msaa)
 
 	# 建立通用資料緩衝（128 bytes = 32 floats）
 	general_data_buffer = rd.uniform_buffer_create(128)
@@ -166,6 +168,22 @@ func _initialize_compute() -> void:
 	# 建立相機矩陣緩衝
 	camera_buffer = rd.uniform_buffer_create(CAMERA_BUFFER_SIZE)
 	camera_data.resize(CAMERA_BUFFER_SIZE)
+
+
+func _load_composite_shader(path: String, label: String) -> RID:
+	var shader_file := load(path) as RDShaderFile
+	if not shader_file:
+		printerr("VolumetricCloudEffect: 找不到合成 shader（", label, "）")
+		return RID()
+	var spirv := shader_file.get_spirv()
+	var compile_err: String = spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+	if compile_err != "":
+		printerr("VolumetricCloudEffect: 合成 shader 編譯失敗（", label, "）:\n", compile_err)
+		return RID()
+	var sh := rd.shader_create_from_spirv(spirv)
+	if not sh.is_valid():
+		printerr("VolumetricCloudEffect: shader_create_from_spirv 失敗（", label, "）")
+	return sh
 
 
 func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) -> void:
@@ -191,27 +209,38 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 	var render_scene_data: RenderSceneData = p_render_data.get_render_scene_data()
 	var view_count := render_scene_buffers.get_view_count()
 
-	# 重建條件：解析度變、blend 貼圖 RID 變、或 uniform set 被引擎作廢。
-	# 最後一項跟 noise set 同理：本 set 綁了引擎擁有的 color/depth 緩衝 RID，
-	# 解析度或 render target 變動時引擎會重建那些 view、連帶作廢本 set。用
-	# uniform_set_is_valid 主動偵測，比只靠 size 比較更穩。
+	# MSAA 偵測：8x MSAA 下若往 resolved buffer 寫雲，後續 pass 用 MSAA buffer
+	# 會看不到雲。MSAA 開啟時要用 .msaa 變體，綁 MSAA color/depth 逐樣本寫。
+	var msaa_mode := render_scene_buffers.get_msaa_3d()
+	var is_msaa: bool = msaa_mode != RenderingServer.ViewportMSAA.VIEWPORT_MSAA_DISABLED
+	# MSAA 變體沒成功編譯就退回非 MSAA（至少不 crash，可能看不到雲，會在 log 提示）
+	if is_msaa and not composite_pipeline_msaa.is_valid():
+		is_msaa = false
+
+	# 重建條件：解析度變、blend 貼圖 RID 變、MSAA 狀態變、或 uniform set 被引擎作廢。
+	# set 失效那項跟 noise set 同理：本 set 綁了引擎擁有的 color/depth 緩衝 RID，
+	# 解析度或 render target 變動時引擎會重建那些 view、連帶作廢本 set。
 	var set_invalid: bool = uniform_sets.is_empty() or not rd.uniform_set_is_valid(uniform_sets[0])
 	var needs_rebuild: bool = (size != last_size
 		or uniform_sets.size() != view_count
 		or blend_from_rd != last_blend_from_rd
 		or blend_to_rd != last_blend_to_rd
+		or is_msaa != _last_msaa_on
 		or set_invalid)
 	if needs_rebuild:
-		_rebuild_resources(render_scene_buffers, size, view_count, blend_from_rd, blend_to_rd, render_scene_data)
+		_rebuild_resources(render_scene_buffers, size, view_count, blend_from_rd, blend_to_rd, render_scene_data, is_msaa)
 		last_size = size
 		last_blend_from_rd = blend_from_rd
 		last_blend_to_rd = blend_to_rd
+		_last_msaa_on = is_msaa
 
 	# 更新通用資料
 	_update_general_data(size, render_scene_data)
 
-	# 執行合成（考慮解析度縮放）
-	var res_div: int = int(pow(2.0, float(resolution_scale)))
+	# 選對應 pipeline。MSAA 變體強制原生解析度（shader 端也強制），所以 dispatch
+	# 涵蓋全螢幕；非 MSAA 才套 resolution_scale 縮小 work size。
+	var active_pipeline: RID = composite_pipeline_msaa if _msaa_active else composite_pipeline
+	var res_div: int = 1 if _msaa_active else int(pow(2.0, float(resolution_scale)))
 	var work_size_x: int = (size.x + res_div - 1) / res_div
 	var work_size_y: int = (size.y + res_div - 1) / res_div
 	var x_groups := ((work_size_x - 1) / 8) + 1
@@ -220,11 +249,18 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 	for view in view_count:
 		if view >= uniform_sets.size():
 			break
-		# 防呆：重建後仍無效就跳過該 view，不送進 dispatch（避免 null bind 連鎖錯誤）
+		# 防呆：重建後仍無效就跳過該 view（避免 null bind 連鎖錯誤）。
 		if not rd.uniform_set_is_valid(uniform_sets[view]):
+			# MSAA 下若一直無效，最可能是引擎 MSAA color 緩衝不支援當 storage image
+			# 寫入（image2DMS）。一次性報明，方便判斷「MSAA 下看不到雲」的成因——
+			# 若是此因，需改用 blit 貼圖 + raster display pass（SSC2 做法）。
+			if _msaa_active and not _msaa_warn_logged:
+				_msaa_warn_logged = true
+				printerr("VolumetricCloudEffect: MSAA 合成 uniform set 無效，",
+					"MSAA color 緩衝可能不支援 storage 寫入，MSAA 下雲不會顯示")
 			continue
 		var compute_list := rd.compute_list_begin()
-		rd.compute_list_bind_compute_pipeline(compute_list, composite_pipeline)
+		rd.compute_list_bind_compute_pipeline(compute_list, active_pipeline)
 		rd.compute_list_bind_uniform_set(compute_list, uniform_sets[view], 0)
 		rd.compute_list_dispatch(compute_list, x_groups, y_groups, 1)
 		rd.compute_list_end()
@@ -233,7 +269,7 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 
 
 func _rebuild_resources(buffers: RenderSceneBuffersRD, size: Vector2i, view_count: int,
-		blend_from_rd: RID, blend_to_rd: RID, scene_data: RenderSceneData) -> void:
+		blend_from_rd: RID, blend_to_rd: RID, scene_data: RenderSceneData, is_msaa: bool) -> void:
 	# 清理舊的
 	for tex in accumulation_textures:
 		if tex.is_valid():
@@ -243,6 +279,10 @@ func _rebuild_resources(buffers: RenderSceneBuffersRD, size: Vector2i, view_coun
 	if reflections_rd.is_valid():
 		rd.free_rid(reflections_rd)
 		reflections_rd = RID()
+
+	# 這次重建用 MSAA 變體還是非 MSAA 變體（決定綁哪種緩衝、用哪個 shader 建 set）
+	_msaa_active = is_msaa
+	var build_shader: RID = composite_shader_msaa if is_msaa else composite_shader
 
 	# 建立反射紋理
 	var refl_format := RDTextureFormat.new()
@@ -263,13 +303,11 @@ func _rebuild_resources(buffers: RenderSceneBuffersRD, size: Vector2i, view_coun
 	if reflections_param_name != "":
 		RenderingServer.global_shader_parameter_set(reflections_param_name, reflections_texture)
 
-	var msaa_mode := buffers.get_msaa_3d()
-	var is_msaa: bool = msaa_mode != RenderingServer.ViewportMSAA.VIEWPORT_MSAA_DISABLED
-
 	for view in view_count:
-		# MSAA 支援：用 resolved 版本（false）確保可以當 sampler 取樣
-		var color_image: RID = buffers.get_color_layer(view, false)
-		var depth_image: RID = buffers.get_depth_layer(view, false)
+		# MSAA 時綁 MSAA color/depth（image2DMS / sampler2DMS 逐樣本寫）；
+		# 非 MSAA 綁 resolved 版本。第二參數 true=MSAA layer, false=resolved。
+		var color_image: RID = buffers.get_color_layer(view, is_msaa)
+		var depth_image: RID = buffers.get_depth_layer(view, is_msaa)
 
 		# 建立累積貼圖（顏色 A/B + 資料 A/B = 4 張）
 		var accum_format := RDTextureFormat.new()
@@ -365,7 +403,9 @@ func _rebuild_resources(buffers: RenderSceneBuffersRD, size: Vector2i, view_coun
 		cam_uniform.add_id(camera_buffer)
 		uniforms.push_back(cam_uniform)
 
-		uniform_sets.append(rd.uniform_set_create(uniforms, composite_shader, 0))
+		# 用對應變體的 shader 建 set（MSAA 變體 binding 0/1 是 image2DMS/sampler2DMS，
+		# 型別必須跟綁的 MSAA 緩衝相符，否則 uniform_set_create 失敗）
+		uniform_sets.append(rd.uniform_set_create(uniforms, build_shader, 0))
 
 
 func _update_general_data(size: Vector2i, _scene_data: RenderSceneData) -> void:

@@ -113,8 +113,8 @@ func _build_scene() -> void:
 
 	# 初始化 CompositorEffect 合成器
 	_vol_effect = VolumetricCloudEffect.new()
-	_vol_effect.clouds_enabled = volumetric_visible
 	_register_compositor_effect()
+	_update_volumetric_routing()
 	
 	# Trigger all inline setters for exported variables
 	var script: GDScript = get_script()
@@ -1228,11 +1228,26 @@ func _recursive_find_env(node: Node) -> WorldEnvironment:
 @export var volumetric_visible: bool = false:
 	set(value):
 		volumetric_visible = value
-		if volumetric_mesh:
-			volumetric_mesh.visible = value
-		if _vol_effect:
-			_vol_effect.clouds_enabled = value
+		_update_volumetric_routing()
 		_check_cloud_processing()
+
+
+## 體積雲顯示路徑：
+## true = CompositorEffect（新，原生管線，含時序重投影/大氣/多光源/可變解析度）
+## false = QuadMesh 顯示著色器（舊，較簡單，MSAA 下保證可見的備援）
+## 兩條路徑互斥，避免雲被合成兩次。
+@export var vol_use_compositor: bool = true:
+	set(value):
+		vol_use_compositor = value
+		_update_volumetric_routing()
+
+
+# 依 volumetric_visible + vol_use_compositor 決定哪條顯示路徑生效（互斥）
+func _update_volumetric_routing() -> void:
+	if volumetric_mesh:
+		volumetric_mesh.visible = volumetric_visible and not vol_use_compositor
+	if _vol_effect:
+		_vol_effect.clouds_enabled = volumetric_visible and vol_use_compositor
 
 @export_subgroup("Density")
 

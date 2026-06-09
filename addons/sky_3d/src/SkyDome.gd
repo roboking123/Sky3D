@@ -20,17 +20,12 @@ const CIRRUS_TEXTURE: Texture2D = preload("res://addons/sky_3d/assets/resources/
 const CUMULUS_TEXTURE: Texture2D = preload("res://addons/sky_3d/assets/textures/noiseClouds.png")
 const SUN_MOON_CURVE: Curve = preload("res://addons/sky_3d/assets/resources/SunMoonLightFade.tres")
 const DAY_NIGHT_TRANSITION_ANGLE: float = deg_to_rad(90)  # Horizon
-const VOLUMETRIC_DISPLAY_SHADER: String = "res://addons/sky_3d/shaders/VolumetricCloudsDisplay.gdshader"
 
 var is_scene_built: bool = false
 var fog_mesh: MeshInstance3D
 var sky_material: ShaderMaterial
 var cumulus_material: Material
 var fog_material: Material
-var volumetric_mesh: MeshInstance3D
-var volumetric_material: ShaderMaterial
-var _vol_renderer: VolumetricCloudRenderer
-var _vol_effect: VolumetricCloudEffect
 
 
 #####################
@@ -91,32 +86,10 @@ func _build_scene() -> void:
 	fog_mesh.custom_aabb = AABB(Vector3(-1e31, -1e31, -1e31), Vector3(2e31, 2e31, 2e31))
 	add_child(fog_mesh)
 	is_scene_built = true
-	
-	# Volumetric Clouds (compute shader 路徑)
-	volumetric_mesh = MeshInstance3D.new()
-	volumetric_mesh.name = "_VolumetricCloudsI"
-	var vol_quad := QuadMesh.new()
-	vol_quad.size = Vector2(2.0, 2.0)
-	volumetric_mesh.mesh = vol_quad
-	volumetric_material = ShaderMaterial.new()
-	volumetric_material.shader = load(VOLUMETRIC_DISPLAY_SHADER)
-	volumetric_material.render_priority = 98
-	volumetric_mesh.material_override = volumetric_material
-	volumetric_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	volumetric_mesh.custom_aabb = AABB(Vector3(-1e31, -1e31, -1e31), Vector3(2e31, 2e31, 2e31))
-	volumetric_mesh.visible = false
-	add_child(volumetric_mesh)
 	fog_material.set_shader_parameter("sun_direction", _sun_transform.origin)
-	# 八面體體積雲（已停用，改用 SSC2 真體積雲）。只在 volumetric_visible 時才建，
-	# 避免白白建立 compute 資源、避免 CompositorEffect 跟 SSC2 衝突。
-	if volumetric_visible:
-		_vol_renderer = VolumetricCloudRenderer.new()
-		_vol_renderer.initialize(vol_texture_size, vol_frames_to_update)
-		_vol_effect = VolumetricCloudEffect.new()
-		if vol_use_compositor:
-			_register_compositor_effect()
-		_update_volumetric_routing()
-	
+	# 體積雲已改用 SSC2（addons/SunshineClouds2），由場景的 SunshineCloudsDriver
+	# 驅動，不在 SkyDome 處理。
+
 	# Trigger all inline setters for exported variables
 	var script: GDScript = get_script()
 	for prop in script.get_script_property_list():
@@ -152,25 +125,6 @@ func process_tick(delta: float) -> void:
 			_cirrus_position2 = (_cirrus_position2 + position_delta).posmod(1.0)
 			sky_material.set_shader_parameter("cirrus_position1", _cirrus_position1)
 			sky_material.set_shader_parameter("cirrus_position2", _cirrus_position2)
-	if volumetric_visible and _vol_renderer and _vol_renderer.can_run:
-		var wind_norm: Vector2 = _cloud_direction.normalized()
-		_vol_renderer.cloud_pos += delta * wind_norm * _cloud_speed
-		_vol_renderer.detail_pos += delta * wind_norm
-		_vol_renderer.weather_pos += delta * 0.001 * wind_norm * _cloud_speed
-		_vol_renderer.current_time = Time.get_ticks_msec() / 1000.0
-		_vol_renderer.wind_direction = wind_norm
-		_sync_volumetric_lights()
-		_vol_renderer.process_density_queries()
-		_vol_renderer.render_frame()
-		# 舊路徑：QuadMesh 顯示（保留向後相容）
-		volumetric_material.set_shader_parameter("blend_from_texture", _vol_renderer.get_blend_from_texture())
-		volumetric_material.set_shader_parameter("blend_to_texture", _vol_renderer.get_blend_to_texture())
-		volumetric_material.set_shader_parameter("blend_amount", _vol_renderer.get_blend_amount())
-		# 新路徑：CompositorEffect 合成
-		if _vol_effect:
-			_vol_effect.blend_from_texture = _vol_renderer.get_blend_from_texture()
-			_vol_effect.blend_to_texture = _vol_renderer.get_blend_to_texture()
-			_vol_effect.blend_amount = _vol_renderer.get_blend_amount()
 
 
 #####################
@@ -215,10 +169,6 @@ func _update_color_correction() -> void:
 		var correction_params := Vector2(tonemap_level, exposure)
 		sky_material.set_shader_parameter("color_correction", correction_params)
 		fog_material.set_shader_parameter("color_correction", correction_params)
-		if volumetric_material:
-			volumetric_material.set_shader_parameter("color_correction", correction_params)
-		if _vol_effect:
-			_vol_effect.color_correction = correction_params
 
 
 #####################
@@ -310,10 +260,6 @@ func _update_sun_coords() -> void:
 	fog_material.set_shader_parameter("sun_direction", _sun_transform.origin)
 	if _sun_light_node:
 		_sun_light_node.transform = _sun_transform
-	if _vol_renderer:
-		_vol_renderer.sun_direction = _sun_transform.origin
-	if _vol_effect:
-		_vol_effect.sun_direction = _sun_transform.origin
 
 	_set_day_state(sun_altitude)
 	_update_night_intensity()
@@ -369,10 +315,6 @@ func _update_sun_light_color() -> void:
 		return
 	var sun_light_altitude_mult: float = clampf(_sun_transform.origin.y * 2.0, 0., 1.)
 	_sun_light_node.light_color = sun_horizon_light_color.lerp(sun_light_color, sun_light_altitude_mult)
-	#sync volumetric cloud colors
-	if _vol_renderer:
-		_vol_renderer.cloud_day_color = sun_light_color
-		_vol_renderer.cloud_horizon_color = sun_horizon_light_color
 	if is_scene_built:
 		sky_material.set_shader_parameter("sun_light_color", _sun_light_node.light_color)
 
@@ -486,10 +428,6 @@ func update_moon_coords() -> void:
 	var moon_basis: Basis = get_parent().moon.get_global_transform().basis.inverse()
 	sky_material.set_shader_parameter("moon_matrix", moon_basis)
 	fog_material.set_shader_parameter("moon_direction", _moon_transform.origin)
-	if _vol_renderer:
-		_vol_renderer.moon_direction = _moon_transform.origin
-	if _vol_effect:
-		_vol_effect.moon_direction = _moon_transform.origin
 	if _moon_light_node:
 		_moon_light_node.transform = _moon_transform
 	
@@ -861,8 +799,6 @@ func _update_beta_mie() -> void:
 		if is_scene_built:
 			cumulus_material.set_shader_parameter("clouds_night_color", clouds_night_color)
 			sky_material.set_shader_parameter("clouds_night_color", clouds_night_color)
-			if _vol_renderer:
-				_vol_renderer.cloud_night_color = clouds_night_color
 
 
 #####################
@@ -938,7 +874,7 @@ enum { PHYSICS_PROCESS, PROCESS, MANUAL }
 
 
 func _check_cloud_processing() -> void:
-	var enable: bool = volumetric_visible or ((cirrus_visible or cumulus_visible) and wind_speed != 0.0)
+	var enable: bool = (cirrus_visible or cumulus_visible) and wind_speed != 0.0
 	_cloud_velocity = _cloud_direction * _cloud_speed
 	match process_method:
 		PHYSICS_PROCESS:
@@ -950,103 +886,6 @@ func _check_cloud_processing() -> void:
 		MANUAL, _:
 			set_physics_process(false)
 			set_process(false)
-
-
-
-
-## 同步光源到體積雲 renderer
-func _sync_volumetric_lights() -> void:
-	if not _vol_renderer:
-		return
-	_vol_renderer.directional_lights.clear()
-
-	# 太陽（永遠是第一個方向光）
-	if _sun_light_node and _sun_light_node.visible:
-		_vol_renderer.directional_lights.append({
-			"direction": _sun_transform.origin,
-			"color": _sun_light_node.light_color,
-			"energy": _sun_light_node.light_energy,
-			"shadow_steps": int(vol_shadow_steps)
-		})
-
-	# 月亮
-	if _moon_light_node and _moon_light_node.visible and _moon_light_node.light_energy > 0.01:
-		_vol_renderer.directional_lights.append({
-			"direction": _moon_transform.origin,
-			"color": _moon_light_node.light_color,
-			"energy": _moon_light_node.light_energy,
-			"shadow_steps": maxi(int(vol_shadow_steps) / 2, 2)
-		})
-
-	# 額外方向光
-	for path in vol_extra_directional_lights:
-		var node: DirectionalLight3D = get_node_or_null(path) as DirectionalLight3D
-		if node and node.visible:
-			var look_dir: Vector3 = node.global_transform.basis.z.normalized()
-			_vol_renderer.directional_lights.append({
-				"direction": look_dir,
-				"color": node.light_color,
-				"energy": node.light_energy,
-				"shadow_steps": int(vol_shadow_steps)
-			})
-
-	# 點光源
-	_vol_renderer.point_lights.clear()
-	for path in vol_point_lights:
-		var node: OmniLight3D = get_node_or_null(path) as OmniLight3D
-		if node and node.visible:
-			_vol_renderer.point_lights.append({
-				"position": node.global_position,
-				"color": node.light_color,
-				"energy": node.light_energy,
-				"radius": node.omni_range
-			})
-
-
-## 把 VolumetricCloudEffect 註冊到場景的 Compositor
-func _register_compositor_effect() -> void:
-	if not _vol_effect or not environment:
-		return
-	var env_node: WorldEnvironment = _find_world_environment()
-	if not env_node:
-		return
-	if not env_node.compositor:
-		env_node.compositor = Compositor.new()
-	var effects: Array[CompositorEffect] = []
-	for e in env_node.compositor.compositor_effects:
-		effects.append(e)
-	if not effects.has(_vol_effect):
-		effects.append(_vol_effect)
-		env_node.compositor.compositor_effects = effects
-
-
-func _unregister_compositor_effect() -> void:
-	if not _vol_effect:
-		return
-	var env_node: WorldEnvironment = _find_world_environment()
-	if not env_node or not env_node.compositor:
-		return
-	var effects: Array[CompositorEffect] = []
-	for e in env_node.compositor.compositor_effects:
-		if e != _vol_effect:
-			effects.append(e)
-	env_node.compositor.compositor_effects = effects
-
-
-func _find_world_environment() -> WorldEnvironment:
-	if not is_inside_tree():
-		return null
-	return _recursive_find_env(get_tree().root)
-
-
-func _recursive_find_env(node: Node) -> WorldEnvironment:
-	for child in node.get_children():
-		if child is WorldEnvironment:
-			return child
-		var result: WorldEnvironment = _recursive_find_env(child)
-		if result:
-			return result
-	return null
 
 
 #####################
@@ -1219,182 +1058,6 @@ func _recursive_find_env(node: Node) -> WorldEnvironment:
 		cumulus_size = value
 		if is_scene_built:
 			cumulus_material.set_shader_parameter("cumulus_size", cumulus_size)
-
-#####################
-## Volumetric Clouds
-#####################
-
-@export_group("Volumetric Clouds")
-
-@export var volumetric_visible: bool = false:
-	set(value):
-		volumetric_visible = value
-		_update_volumetric_routing()
-		_check_cloud_processing()
-
-
-## 體積雲顯示路徑：
-## false = QuadMesh 顯示著色器（預設，渲染為幾何，MSAA 原生正確，無 STORAGE 限制）
-## true = CompositorEffect（原生管線合成，含時序重投影/大氣/可變解析度）
-##        ⚠️ 需引擎 color 緩衝支援 STORAGE 寫入；多數設定下不支援，會自動停用並
-##        要求改回 QuadMesh。要讓它在 STORAGE 不支援時也能用，需補 raster
-##        display pass（SSC2 做法），尚未實作。
-## 兩條路徑互斥，避免雲被合成兩次。
-@export var vol_use_compositor: bool = false:
-	set(value):
-		vol_use_compositor = value
-		_update_volumetric_routing()
-
-
-# 依 volumetric_visible + vol_use_compositor 決定哪條顯示路徑生效（互斥）
-func _update_volumetric_routing() -> void:
-	if volumetric_mesh:
-		volumetric_mesh.visible = volumetric_visible and not vol_use_compositor
-	if _vol_effect:
-		_vol_effect.clouds_enabled = volumetric_visible and vol_use_compositor
-
-@export_subgroup("Density")
-
-@export_range(0.0, 1.0, 0.01) var vol_coverage: float = 0.25:
-	set(value):
-		vol_coverage = value
-		if _vol_renderer:
-			_vol_renderer.coverage = value
-
-## 0 = stratus, 0.5 = cumulus, 1.0 = cumulonimbus
-@export_range(0.0, 1.0, 0.01) var vol_cloud_type: float = 0.5:
-	set(value):
-		vol_cloud_type = value
-		if _vol_renderer:
-			_vol_renderer.cloud_type = value
-
-@export_range(0.01, 0.5, 0.001) var vol_density: float = 0.05:
-	set(value):
-		vol_density = value
-		if _vol_renderer:
-			_vol_renderer.density = value
-
-@export_subgroup("Lighting")
-
-@export_range(0.01, 0.5, 0.001) var vol_absorption: float = 0.06:
-	set(value):
-		vol_absorption = value
-		if _vol_renderer:
-			_vol_renderer.absorption = value
-
-@export_subgroup("Detail")
-
-@export_range(0.0, 1.0, 0.01) var vol_detail_strength: float = 0.4:
-	set(value):
-		vol_detail_strength = value
-		if _vol_renderer:
-			_vol_renderer.detail_strength = value
-
-@export_subgroup("Weather")
-
-## 啟用天氣圖（自動生成，控制雲型和覆蓋率的空間分布）
-@export var vol_weather_map: bool = true:
-	set(value):
-		vol_weather_map = value
-		if _vol_renderer:
-			_vol_renderer.use_weather = value
-
-@export_subgroup("Curl Noise")
-
-## Curl noise 強度（SSC2 風格的雲邊緣捲曲，0 = 關閉）
-@export_range(0.0, 10000.0, 100.0) var vol_curl_strength: float = 4500.0:
-	set(value):
-		vol_curl_strength = value
-		if _vol_renderer:
-			_vol_renderer.curl_strength = value
-
-## Curl noise 取樣尺度
-@export_range(0.00001, 0.001, 0.00001) var vol_curl_scale: float = 0.00005:
-	set(value):
-		vol_curl_scale = value
-		if _vol_renderer:
-			_vol_renderer.curl_noise_scale = value
-
-@export_subgroup("Wind Shear")
-
-## 風切強度（底部雲被風吹偏，0 = 關閉）
-@export_range(0.0, 5000.0, 10.0) var vol_wind_shear_power: float = 0.0:
-	set(value):
-		vol_wind_shear_power = value
-		if _vol_renderer:
-			_vol_renderer.wind_shear_power = value
-
-## 風切高度範圍（0~1，越小只影響越底部）
-@export_range(0.01, 1.0, 0.01) var vol_wind_shear_range: float = 0.54:
-	set(value):
-		vol_wind_shear_range = value
-		if _vol_renderer:
-			_vol_renderer.wind_shear_range = value
-
-@export_subgroup("Ambient Occlusion")
-
-## 雲底 AO 強度（0 = 關閉）
-@export_range(0.0, 1.0, 0.01) var vol_ao_strength: float = 0.3:
-	set(value):
-		vol_ao_strength = value
-		if _vol_renderer:
-			_vol_renderer.ao_strength = value
-
-@export_subgroup("Multi-Light")
-
-## 額外的方向光（太陽/月亮之外的）
-@export var vol_extra_directional_lights: Array[NodePath] = []:
-	set(value):
-		vol_extra_directional_lights = value
-
-## 影響雲的點光源
-@export var vol_point_lights: Array[NodePath] = []:
-	set(value):
-		vol_point_lights = value
-
-## 反射紋理輸出到 global shader parameter（留空 = 不輸出）
-@export var vol_reflections_param: String = "":
-	set(value):
-		vol_reflections_param = value
-		if _vol_effect:
-			_vol_effect.reflections_param_name = value
-
-## 合成解析度縮放（0=原生, 1=半, 2=四分之一, 3=八分之一）
-@export_enum("Native:0", "Half:1", "Quarter:2", "Eighth:3") var vol_resolution_scale: int = 1:
-	set(value):
-		vol_resolution_scale = value
-		if _vol_effect:
-			_vol_effect.resolution_scale = value
-
-## 時序累積衰減（0=不累積即時呈現, 越高越平滑但快速移動時越拖影）
-@export_range(0.0, 0.95, 0.01) var vol_accumulation_decay: float = 0.7:
-	set(value):
-		vol_accumulation_decay = value
-		if _vol_effect:
-			_vol_effect.accumulation_decay = value
-
-@export_subgroup("Quality")
-
-## 光線步進次數（越高品質越好，越慢）
-@export_range(32, 256, 8) var vol_march_steps: int = 128:
-	set(value):
-		vol_march_steps = value
-		if _vol_renderer:
-			_vol_renderer.march_steps = float(value)
-
-## 陰影步進次數
-@export_range(2, 16, 1) var vol_shadow_steps: int = 6:
-	set(value):
-		vol_shadow_steps = value
-		if _vol_renderer:
-			_vol_renderer.shadow_steps = float(value)
-
-## 渲染貼圖解析度（越高品質越好，越慢）
-@export_range(256, 2048, 64) var vol_texture_size: int = 768
-
-## 幾幀更新一整張貼圖（越高越省效能，但更新越慢）
-@export_enum("Very Fast(4):4", "Fast(16):16", "Default(64):64", "Slow(256):256")
-var vol_frames_to_update: int = 64
 
 #####################
 ## Stars

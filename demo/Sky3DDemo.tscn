@@ -34,6 +34,8 @@ const CAMERA_RATIO: float = .625
 @onready var _camera_yaw: Node3D = self
 @onready var _camera_pitch: Node3D = $Camera3D
 
+var _alt_label: Label
+
 
 func _init() -> void:
 	RenderingServer.set_debug_generate_wireframes(true)
@@ -41,10 +43,20 @@ func _init() -> void:
 	
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+	var hud: CanvasLayer = CanvasLayer.new()
+	add_child(hud)
+	_alt_label = Label.new()
+	_alt_label.position = Vector2(20, 20)
+	_alt_label.add_theme_font_size_override(\"font_size\", 22)
+	hud.add_child(_alt_label)
 
 
 func _physics_process(p_delta: float) -> void:
-	position += get_camera_relative_input().normalized() * move_speed * p_delta
+	# 按住 Shift 衝刺（12 倍速），快速爬升到雲層
+	var sprint: float = 12.0 if Input.is_key_pressed(KEY_SHIFT) else 1.0
+	position += get_camera_relative_input().normalized() * move_speed * sprint * p_delta
+	if _alt_label:
+		_alt_label.text = \"高度 %d m  (Shift 衝刺 / Space 上 / Q 下)\" % int(position.y)
 
 
 func _input(p_event: InputEvent) -> void:

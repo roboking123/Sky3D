@@ -191,11 +191,16 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 	var render_scene_data: RenderSceneData = p_render_data.get_render_scene_data()
 	var view_count := render_scene_buffers.get_view_count()
 
-	# 解析度變化或貼圖 RID 變化時重建資源
+	# 重建條件：解析度變、blend 貼圖 RID 變、或 uniform set 被引擎作廢。
+	# 最後一項跟 noise set 同理：本 set 綁了引擎擁有的 color/depth 緩衝 RID，
+	# 解析度或 render target 變動時引擎會重建那些 view、連帶作廢本 set。用
+	# uniform_set_is_valid 主動偵測，比只靠 size 比較更穩。
+	var set_invalid: bool = uniform_sets.is_empty() or not rd.uniform_set_is_valid(uniform_sets[0])
 	var needs_rebuild: bool = (size != last_size
 		or uniform_sets.size() != view_count
 		or blend_from_rd != last_blend_from_rd
-		or blend_to_rd != last_blend_to_rd)
+		or blend_to_rd != last_blend_to_rd
+		or set_invalid)
 	if needs_rebuild:
 		_rebuild_resources(render_scene_buffers, size, view_count, blend_from_rd, blend_to_rd, render_scene_data)
 		last_size = size
@@ -215,6 +220,9 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 	for view in view_count:
 		if view >= uniform_sets.size():
 			break
+		# 防呆：重建後仍無效就跳過該 view，不送進 dispatch（避免 null bind 連鎖錯誤）
+		if not rd.uniform_set_is_valid(uniform_sets[view]):
+			continue
 		var compute_list := rd.compute_list_begin()
 		rd.compute_list_bind_compute_pipeline(compute_list, composite_pipeline)
 		rd.compute_list_bind_uniform_set(compute_list, uniform_sets[view], 0)
@@ -452,14 +460,31 @@ func _encode_transform_as_mat4(data: PackedByteArray, offset: int, xform: Transf
 
 var _prev_cam_transform: Transform3D = Transform3D.IDENTITY
 var _prev_cam_projection: Projection = Projection.IDENTITY
+var _camera_initialized: bool = false
 
 
+# 為什麼自建 CameraData UBO，而不是用 Godot 原生的 SceneData UBO（SSC2 做法）：
+#   原生 SceneData UBO 含引擎自己維護的 prev_data，理論上時序最準。但要在 .glsl
+#   手寫一份逐位元組對齊 Godot 4.6 內部佈局的 SceneData 結構，抄錯就是靜默拖影
+#   （不報錯、雲糊掉），且綁的是引擎擁有的 UBO RID，會踩跟 noise set 同一類的
+#   失效問題（見 VolumetricCloudRenderer 的 _ensure_uniform_sets 註解）。
+#
+#   自建 UBO：我們完全擁有、每幀更新、恆有效，不依賴引擎內部結構。prev 用上一幀
+#   的 cam_transform，時序精確是 1 幀前；跟引擎 prev_data 唯一差別是 TAA jitter
+#   的次像素偏移——對模糊、緩變的八面體雲重投影完全不可見。用安全換取看不見的
+#   精度，是划算的。
 func _update_camera_data(scene_data: RenderSceneData) -> void:
 	if not camera_buffer.is_valid():
 		return
 
 	var cam_xform: Transform3D = scene_data.get_cam_transform()
 	var cam_proj: Projection = scene_data.get_cam_projection()
+
+	# 首幀：prev = current，避免第一幀重投影用 IDENTITY 跑出垃圾偏移
+	if not _camera_initialized:
+		_prev_cam_transform = cam_xform
+		_prev_cam_projection = cam_proj
+		_camera_initialized = true
 
 	var idx: int = 0
 	# mat4 inv_projection（從 Projection 反轉）

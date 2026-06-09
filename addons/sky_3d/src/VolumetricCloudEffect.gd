@@ -18,6 +18,7 @@ var composite_pipeline_msaa: RID = RID()
 var _msaa_active: bool = false            # 當前這次重建用的是 MSAA 變體嗎
 var _last_msaa_on: bool = false           # 上次 callback 的 MSAA 狀態，變了要重建
 var _msaa_warn_logged: bool = false       # MSAA set 失效診斷只報一次
+var _storage_warn_logged: bool = false    # color 緩衝無 STORAGE 診斷只報一次
 
 # 取樣器
 var linear_sampler: RID = RID()
@@ -219,6 +220,20 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 	# MSAA 變體沒成功編譯就退回非 MSAA（至少不 crash，可能看不到雲，會在 log 提示）
 	if is_msaa and not composite_pipeline_msaa.is_valid():
 		is_msaa = false
+
+	# 硬限制偵測：引擎 color 緩衝若無 STORAGE usage，compute 無法直接 imageStore 寫它
+	# （Godot 預設不給 color 緩衝 STORAGE bit）。要寫得改走 raster display pass
+	# （SSC2 做法：合成到自有貼圖再 blit 回 framebuffer）。偵測到就優雅停用本路徑、
+	# 報一次，請改用 QuadMesh 顯示（SkyDome 的 vol_use_compositor=false）。
+	var color0 := render_scene_buffers.get_color_layer(0, is_msaa)
+	var color_fmt := rd.texture_get_format(color0)
+	if (color_fmt.usage_bits & RenderingDevice.TEXTURE_USAGE_STORAGE_BIT) == 0:
+		if not _storage_warn_logged:
+			_storage_warn_logged = true
+			push_warning("VolumetricCloudEffect: 引擎 color 緩衝無 STORAGE usage，",
+				"compute 無法直接寫入，compositor 顯示路徑停用。",
+				"請用 QuadMesh 顯示（SkyDome.vol_use_compositor = false）。")
+		return
 
 	# 重建條件：解析度變、blend 貼圖 RID 變、MSAA 狀態變、或 uniform set 被引擎作廢。
 	# set 失效那項跟 noise set 同理：本 set 綁了引擎擁有的 color/depth 緩衝 RID，

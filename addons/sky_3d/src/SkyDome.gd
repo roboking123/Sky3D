@@ -1233,10 +1233,13 @@ func _recursive_find_env(node: Node) -> WorldEnvironment:
 
 
 ## 體積雲顯示路徑：
-## true = CompositorEffect（新，原生管線，含時序重投影/大氣/多光源/可變解析度）
-## false = QuadMesh 顯示著色器（舊，較簡單，MSAA 下保證可見的備援）
+## false = QuadMesh 顯示著色器（預設，渲染為幾何，MSAA 原生正確，無 STORAGE 限制）
+## true = CompositorEffect（原生管線合成，含時序重投影/大氣/可變解析度）
+##        ⚠️ 需引擎 color 緩衝支援 STORAGE 寫入；多數設定下不支援，會自動停用並
+##        要求改回 QuadMesh。要讓它在 STORAGE 不支援時也能用，需補 raster
+##        display pass（SSC2 做法），尚未實作。
 ## 兩條路徑互斥，避免雲被合成兩次。
-@export var vol_use_compositor: bool = true:
+@export var vol_use_compositor: bool = false:
 	set(value):
 		vol_use_compositor = value
 		_update_volumetric_routing()

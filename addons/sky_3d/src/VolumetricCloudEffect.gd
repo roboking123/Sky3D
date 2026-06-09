@@ -43,6 +43,12 @@ var last_size: Vector2i = Vector2i.ZERO
 var general_data_buffer: RID = RID()
 var general_data: PackedByteArray
 
+# 相機矩陣緩衝（取代 SceneData UBO）
+var camera_buffer: RID = RID()
+var camera_data: PackedByteArray
+# 4 mat4 (256 bytes) + 4 floats (16 bytes) = 272 bytes, 對齊到 288
+const CAMERA_BUFFER_SIZE := 288
+
 # uniform set 快取（每個 view 一組）
 var uniform_sets: Array[RID] = []
 var last_blend_from_rd: RID = RID()
@@ -51,6 +57,14 @@ var last_blend_to_rd: RID = RID()
 # 模糊參數
 var blur_power: float = 2.0
 var blur_quality: float = 1.0
+
+## 解析度縮放：0=原生, 1=半, 2=四分之一, 3=八分之一
+var resolution_scale: int = 1
+
+# 反射紋理輸出（SSC2 做法）
+var reflections_param_name: String = ""
+var reflections_texture: Texture2DRD
+var reflections_rd: RID = RID()
 
 # 啟用旗標
 var clouds_enabled: bool = true
@@ -90,6 +104,10 @@ func _cleanup_compute() -> void:
 		if general_data_buffer.is_valid():
 			rd.free_rid(general_data_buffer)
 		general_data_buffer = RID()
+
+		if camera_buffer.is_valid():
+			rd.free_rid(camera_buffer)
+		camera_buffer = RID()
 
 		for tex in accumulation_textures:
 			if tex.is_valid():
@@ -140,6 +158,10 @@ func _initialize_compute() -> void:
 	general_data_buffer = rd.uniform_buffer_create(128)
 	general_data.resize(128)
 
+	# 建立相機矩陣緩衝
+	camera_buffer = rd.uniform_buffer_create(CAMERA_BUFFER_SIZE)
+	camera_data.resize(CAMERA_BUFFER_SIZE)
+
 
 func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) -> void:
 	if not rd or not composite_pipeline.is_valid() or not clouds_enabled:
@@ -178,9 +200,12 @@ func _render_callback(p_effect_callback_type: int, p_render_data: RenderData) ->
 	# 更新通用資料
 	_update_general_data(size, render_scene_data)
 
-	# 執行合成
-	var x_groups := ((size.x - 1) / 8) + 1
-	var y_groups := ((size.y - 1) / 8) + 1
+	# 執行合成（考慮解析度縮放）
+	var res_div: int = int(pow(2.0, float(resolution_scale)))
+	var work_size_x: int = (size.x + res_div - 1) / res_div
+	var work_size_y: int = (size.y + res_div - 1) / res_div
+	var x_groups := ((work_size_x - 1) / 8) + 1
+	var y_groups := ((work_size_y - 1) / 8) + 1
 
 	for view in view_count:
 		if view >= uniform_sets.size():
@@ -202,10 +227,36 @@ func _rebuild_resources(buffers: RenderSceneBuffersRD, size: Vector2i, view_coun
 			rd.free_rid(tex)
 	accumulation_textures.clear()
 	uniform_sets.clear()
+	if reflections_rd.is_valid():
+		rd.free_rid(reflections_rd)
+		reflections_rd = RID()
+
+	# 建立反射紋理
+	var refl_format := RDTextureFormat.new()
+	refl_format.format = RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+	refl_format.texture_type = RenderingDevice.TEXTURE_TYPE_2D
+	refl_format.width = size.x
+	refl_format.height = size.y
+	refl_format.depth = 1
+	refl_format.array_layers = 1
+	refl_format.mipmaps = 1
+	refl_format.usage_bits = (
+		RenderingDevice.TEXTURE_USAGE_STORAGE_BIT |
+		RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
+	)
+	reflections_rd = rd.texture_create(refl_format, RDTextureView.new())
+	reflections_texture = Texture2DRD.new()
+	reflections_texture.texture_rd_rid = reflections_rd
+	if reflections_param_name != "":
+		RenderingServer.global_shader_parameter_set(reflections_param_name, reflections_texture)
+
+	var msaa_mode := buffers.get_msaa_3d()
+	var is_msaa: bool = msaa_mode != RenderingServer.ViewportMSAA.VIEWPORT_MSAA_DISABLED
 
 	for view in view_count:
-		var color_image: RID = buffers.get_color_layer(view)
-		var depth_image: RID = buffers.get_depth_layer(view)
+		# MSAA 支援：用 resolved 版本（false）確保可以當 sampler 取樣
+		var color_image: RID = buffers.get_color_layer(view, false)
+		var depth_image: RID = buffers.get_depth_layer(view, false)
 
 		# 建立累積貼圖（顏色 A/B + 資料 A/B = 4 張）
 		var accum_format := RDTextureFormat.new()
@@ -294,13 +345,12 @@ func _rebuild_resources(buffers: RenderSceneBuffersRD, size: Vector2i, view_coun
 		accum_db.add_id(accumulation_textures[view * 4 + 3])
 		uniforms.push_back(accum_db)
 
-		# binding 9: 場景資料
-		var camera_data := scene_data.get_uniform_buffer()
-		var camera_uniform := RDUniform.new()
-		camera_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
-		camera_uniform.binding = 9
-		camera_uniform.add_id(camera_data)
-		uniforms.push_back(camera_uniform)
+		# binding 9: 相機矩陣（自建 UBO）
+		var cam_uniform := RDUniform.new()
+		cam_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+		cam_uniform.binding = 9
+		cam_uniform.add_id(camera_buffer)
+		uniforms.push_back(cam_uniform)
 
 		uniform_sets.append(rd.uniform_set_create(uniforms, composite_shader, 0))
 
@@ -349,10 +399,86 @@ func _update_general_data(size: Vector2i, _scene_data: RenderSceneData) -> void:
 	general_data.encode_float(idx, atmosphere_color.g); idx += 4
 	general_data.encode_float(idx, atmosphere_color.b); idx += 4
 
-	# padding (19)
-	general_data.encode_float(idx, 0.0); idx += 4
+	# resolution_scale (19)
+	general_data.encode_float(idx, float(int(pow(2.0, float(resolution_scale))))); idx += 4
 
 	# 剩餘 12 floats 保留給未來擴充
 	# (idx = 80, 剩 48 bytes = 12 floats)
 
 	rd.buffer_update(general_data_buffer, 0, general_data.size(), general_data)
+
+	# 更新相機矩陣
+	_update_camera_data(_scene_data)
+
+
+func _encode_projection(data: PackedByteArray, offset: int, proj: Projection) -> int:
+	for col in 4:
+		var v: Vector4 = proj[col]
+		data.encode_float(offset, v.x); offset += 4
+		data.encode_float(offset, v.y); offset += 4
+		data.encode_float(offset, v.z); offset += 4
+		data.encode_float(offset, v.w); offset += 4
+	return offset
+
+
+func _encode_transform_as_mat4(data: PackedByteArray, offset: int, xform: Transform3D) -> int:
+	# 編碼成 column-major mat4
+	data.encode_float(offset, xform.basis.x.x); offset += 4
+	data.encode_float(offset, xform.basis.x.y); offset += 4
+	data.encode_float(offset, xform.basis.x.z); offset += 4
+	data.encode_float(offset, 0.0); offset += 4
+
+	data.encode_float(offset, xform.basis.y.x); offset += 4
+	data.encode_float(offset, xform.basis.y.y); offset += 4
+	data.encode_float(offset, xform.basis.y.z); offset += 4
+	data.encode_float(offset, 0.0); offset += 4
+
+	data.encode_float(offset, xform.basis.z.x); offset += 4
+	data.encode_float(offset, xform.basis.z.y); offset += 4
+	data.encode_float(offset, xform.basis.z.z); offset += 4
+	data.encode_float(offset, 0.0); offset += 4
+
+	data.encode_float(offset, xform.origin.x); offset += 4
+	data.encode_float(offset, xform.origin.y); offset += 4
+	data.encode_float(offset, xform.origin.z); offset += 4
+	data.encode_float(offset, 1.0); offset += 4
+	return offset
+
+
+var _prev_cam_transform: Transform3D = Transform3D.IDENTITY
+var _prev_cam_projection: Projection = Projection.IDENTITY
+
+
+func _update_camera_data(scene_data: RenderSceneData) -> void:
+	if not camera_buffer.is_valid():
+		return
+
+	var cam_xform: Transform3D = scene_data.get_cam_transform()
+	var cam_proj: Projection = scene_data.get_cam_projection()
+
+	var idx: int = 0
+	# mat4 inv_projection（從 Projection 反轉）
+	var inv_proj: Projection = cam_proj.inverse()
+	idx = _encode_projection(camera_data, idx, inv_proj)
+
+	# mat4 inv_view（cam_transform 就是 inv_view）
+	idx = _encode_transform_as_mat4(camera_data, idx, cam_xform)
+
+	# mat4 prev_view（前一幀的 view = inv(prev_cam_transform)）
+	var prev_view: Transform3D = _prev_cam_transform.affine_inverse()
+	idx = _encode_transform_as_mat4(camera_data, idx, prev_view)
+
+	# mat4 prev_projection
+	idx = _encode_projection(camera_data, idx, _prev_cam_projection)
+
+	# z_far, z_near, padding
+	camera_data.encode_float(idx, cam_proj.get_z_far()); idx += 4
+	camera_data.encode_float(idx, cam_proj.get_z_near()); idx += 4
+	camera_data.encode_float(idx, 0.0); idx += 4
+	camera_data.encode_float(idx, 0.0); idx += 4
+
+	rd.buffer_update(camera_buffer, 0, CAMERA_BUFFER_SIZE, camera_data)
+
+	# 記住當前幀給下一幀用
+	_prev_cam_transform = cam_xform
+	_prev_cam_projection = cam_proj

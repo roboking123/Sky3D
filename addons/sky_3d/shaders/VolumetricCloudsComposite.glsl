@@ -9,70 +9,8 @@
 #define PI 3.141592653589793
 #define MAX_VIEWS 2
 
-// Godot 4.6 SceneData 結構（從 CloudsInc.comp 參考）
-struct SceneData {
-	mat4 projection_matrix;
-	mat4 inv_projection_matrix;
-	mat3x4 inv_view_matrix;
-	mat3x4 view_matrix;
-
-	mat4 projection_matrix_view[MAX_VIEWS];
-	mat4 inv_projection_matrix_view[MAX_VIEWS];
-	vec4 eye_offset[MAX_VIEWS];
-
-	mat4 main_cam_inv_view_matrix;
-
-	vec2 viewport_size;
-	vec2 screen_pixel_size;
-
-	vec4 directional_penumbra_shadow_kernel[32];
-	vec4 directional_soft_shadow_kernel[32];
-	vec4 penumbra_shadow_kernel[32];
-	vec4 soft_shadow_kernel[32];
-
-	vec2 shadow_atlas_pixel_size;
-	vec2 directional_shadow_pixel_size;
-
-	float radiance_pixel_size;
-	float radiance_border_size;
-	vec2 reflection_atlas_border_size;
-
-	uint directional_light_count;
-	float dual_paraboloid_side;
-	float z_far;
-	float z_near;
-
-	float roughness_limiter_amount;
-	float roughness_limiter_limit;
-	float opaque_prepass_threshold;
-	uint flags;
-
-	mat3 radiance_inverse_xform;
-
-	vec4 ambient_light_color_energy;
-
-	float ambient_color_sky_mix;
-	float fog_density;
-	float fog_height;
-	float fog_height_density;
-
-	float fog_depth_curve;
-	float fog_depth_begin;
-	float fog_depth_end;
-	float fog_sun_scatter;
-
-	vec3 fog_light_color;
-	float fog_aerial_perspective;
-
-	float time;
-	float taa_frame_count;
-	vec2 taa_jitter;
-
-	float emissive_exposure_normalization;
-	float IBL_exposure_normalization;
-	uint camera_visible_layers;
-	float pass_alpha_multiplier;
-};
+// 不用 Godot SceneData UBO（.glsl 不支援 include，手寫容易跑偏）
+// 改為在 GenericDataBuffer 裡傳必要的相機矩陣
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -87,7 +25,7 @@ layout(binding = 2) uniform sampler2D blend_from_texture;
 layout(binding = 3) uniform sampler2D blend_to_texture;
 
 // binding 4: 通用資料
-layout(binding = 4) uniform GenericDataBuffer {
+layout(binding = 4, std140) uniform GenericDataBuffer {
 	vec2 screen_size;          // 0-1
 	float blend_amount;        // 2
 	float is_accumulation_a;   // 3
@@ -99,7 +37,7 @@ layout(binding = 4) uniform GenericDataBuffer {
 	float blur_quality;        // 14
 	float accumulation_decay;  // 15
 	vec3 atmosphere_color;     // 16-18
-	float _pad0;               // 19
+	float resolution_scale;    // 19 — 1=原生, 2=半, 4=四分之一, 8=八分之一
 	// 剩餘 12 floats 保留
 	vec4 _reserved[3];         // 20-31
 } params;
@@ -110,11 +48,17 @@ layout(rgba16f, binding = 6) uniform image2D accum_color_b;
 layout(rgba16f, binding = 7) uniform image2D accum_data_a;
 layout(rgba16f, binding = 8) uniform image2D accum_data_b;
 
-// binding 9: 場景資料
-layout(binding = 9, std140) uniform SceneDataBlock {
-	SceneData data;
-	SceneData prev_data;
-} scene_data_block;
+// binding 9: 相機矩陣（手動傳入，取代 SceneData UBO）
+layout(binding = 9, std140) uniform CameraData {
+	mat4 inv_projection;         // 當前幀
+	mat4 inv_view;               // 當前幀（main_cam_inv_view_matrix）
+	mat4 prev_view;              // 前一幀 view matrix
+	mat4 prev_projection;        // 前一幀 projection matrix
+	float z_far;
+	float z_near;
+	float _cpad0;
+	float _cpad1;
+} camera;
 
 
 // ============================================================================
@@ -174,37 +118,84 @@ vec3 sample_atmospherics(vec3 ray_dir, vec3 sun_dir, float distance_traveled, fl
 }
 
 // ============================================================================
+// Bicubic 徑向模糊（SSC2 移植）
+// ============================================================================
+
+float w0_bicubic(float a) { return (1.0/6.0)*(a*(a*(-a + 3.0) - 3.0) + 1.0); }
+float w1_bicubic(float a) { return (1.0/6.0)*(a*a*(3.0*a - 6.0) + 4.0); }
+float w2_bicubic(float a) { return (1.0/6.0)*(a*(a*(-3.0*a + 3.0) + 3.0) + 1.0); }
+float w3_bicubic(float a) { return (1.0/6.0)*(a*a*a); }
+float g0_bicubic(float a) { return w0_bicubic(a) + w1_bicubic(a); }
+float g1_bicubic(float a) { return w2_bicubic(a) + w3_bicubic(a); }
+float h0_bicubic(float a) { return -1.0 + w1_bicubic(a) / (w0_bicubic(a) + w1_bicubic(a)); }
+float h1_bicubic(float a) { return 1.0 + w3_bicubic(a) / (w2_bicubic(a) + w3_bicubic(a)); }
+
+vec4 bicubic_sample(ivec2 center, vec2 frac_uv, ivec2 img_size) {
+	float g0x = g0_bicubic(frac_uv.x);
+	float g1x = g1_bicubic(frac_uv.x);
+
+	ivec2 p0 = clamp(center + ivec2(int(h0_bicubic(frac_uv.x)), int(h0_bicubic(frac_uv.y))), ivec2(0), img_size - ivec2(1));
+	ivec2 p1 = clamp(center + ivec2(int(h1_bicubic(frac_uv.x)), int(h0_bicubic(frac_uv.y))), ivec2(0), img_size - ivec2(1));
+	ivec2 p2 = clamp(center + ivec2(int(h0_bicubic(frac_uv.x)), int(h1_bicubic(frac_uv.y))), ivec2(0), img_size - ivec2(1));
+	ivec2 p3 = clamp(center + ivec2(int(h1_bicubic(frac_uv.x)), int(h1_bicubic(frac_uv.y))), ivec2(0), img_size - ivec2(1));
+
+	// 用 accum buffer 做 bicubic 取樣
+	float gy0 = g0_bicubic(frac_uv.y);
+	float gy1 = g1_bicubic(frac_uv.y);
+	return gy0 * (g0x * imageLoad(accum_color_a, p0) + g1x * imageLoad(accum_color_a, p1))
+	     + gy1 * (g0x * imageLoad(accum_color_a, p2) + g1x * imageLoad(accum_color_a, p3));
+}
+
+vec4 radial_blur(vec4 start_color, ivec2 center_uv, ivec2 img_size, float blur_h, float blur_v, float quality) {
+	float pi2 = 6.28318530718;
+	float count = 1.0;
+	vec4 result = start_color;
+	for (float d = 0.0; d < pi2; d += pi2 / (quality * 4.0)) {
+		for (float i = 1.0 / quality; i <= 1.0; i += 1.0 / quality) {
+			ivec2 offset = ivec2(int(cos(d) * blur_h * i), int(sin(d) * blur_v * i));
+			ivec2 sample_uv = clamp(center_uv + offset, ivec2(0), img_size - ivec2(1));
+			result += imageLoad(accum_color_a, sample_uv);
+			count += 1.0;
+		}
+	}
+	return result / count;
+}
+
+// ============================================================================
 // 主程式
 // ============================================================================
 
 void main() {
-	ivec2 uv = ivec2(gl_GlobalInvocationID.xy);
 	ivec2 size = ivec2(params.screen_size);
+	int res_scale_i = max(1, int(params.resolution_scale));
+	ivec2 work_size = (size + ivec2(res_scale_i - 1)) / ivec2(res_scale_i);
+	ivec2 uv = ivec2(gl_GlobalInvocationID.xy);
 
-	if (uv.x >= size.x || uv.y >= size.y) {
+	if (uv.x >= work_size.x || uv.y >= work_size.y) {
 		return;
 	}
 
-	vec2 screen_uv = (vec2(uv) + 0.5) / vec2(size);
+	// 低解析度 UV 映射到全解析度中心
+	vec2 screen_uv = (vec2(uv) * float(res_scale_i) + 0.5 * float(res_scale_i)) / vec2(size);
 
 	// 讀取深度
 	float depth_raw = texture(depth_image, screen_uv).r;
 
 	// 深度線性化
-	vec4 view = scene_data_block.data.inv_projection_matrix * vec4(screen_uv * 2.0 - 1.0, depth_raw, 1.0);
+	vec4 view = camera.inv_projection * vec4(screen_uv * 2.0 - 1.0, depth_raw, 1.0);
 	view.xyz /= view.w;
 	float linear_depth = length(view.xyz);
-	bool is_sky = linear_depth >= scene_data_block.data.z_far * 0.99;
+	bool is_sky = linear_depth >= camera.z_far * 0.99;
 	if (is_sky) {
 		linear_depth *= 100.0;
 	}
 
 	// 重建世界空間視線方向
 	vec4 clip_pos = vec4(screen_uv * 2.0 - 1.0, 0.0, 1.0);
-	vec4 view_pos = scene_data_block.data.inv_projection_matrix * clip_pos;
+	vec4 view_pos = camera.inv_projection * clip_pos;
 	view_pos.xyz /= view_pos.w;
 	vec3 rd_view = normalize(view_pos.xyz);
-	vec3 rd_world = mat3(scene_data_block.data.main_cam_inv_view_matrix) * rd_view;
+	vec3 rd_world = mat3(camera.inv_view) * rd_view;
 	vec3 ray_dir = normalize(rd_world);
 
 	// 只渲染地平線以上
@@ -249,18 +240,19 @@ void main() {
 	float decay = params.accumulation_decay;
 	if (decay > 0.001) {
 		// 重投影：用前一幀相機矩陣算出上一幀的螢幕位置
-		vec3 world_pos = mat3(scene_data_block.data.main_cam_inv_view_matrix) * view.xyz
-			+ scene_data_block.data.main_cam_inv_view_matrix[3].xyz;
+		vec3 world_pos = mat3(camera.inv_view) * view.xyz
+			+ camera.inv_view[3].xyz;
 
 		// 相機位移量
-		vec3 cam_delta = scene_data_block.data.main_cam_inv_view_matrix[3].xyz
-			- scene_data_block.prev_data.main_cam_inv_view_matrix[3].xyz;
+		vec3 cam_delta = camera.inv_view[3].xyz
+			- camera.inv_view[3].xyz;
 		vec3 reprojected_pos = world_pos + cam_delta;
 
 		// 投影到前一幀螢幕空間
 		// 注意：Godot 4.6 的 view_matrix 是 mat3x4，乘 vec4 得到 vec3
-		vec3 prev_view_pos = scene_data_block.prev_data.view_matrix * vec4(reprojected_pos, 1.0);
-		vec4 prev_clip = scene_data_block.prev_data.projection_matrix * vec4(prev_view_pos, 1.0);
+		// prev_view 是前一幀的 view matrix (mat4)，直接乘
+		vec4 prev_view_pos4 = camera.prev_view * vec4(reprojected_pos, 1.0);
+		vec4 prev_clip = camera.prev_projection * prev_view_pos4;
 		vec2 prev_ndc = prev_clip.xy / prev_clip.w;
 		vec2 prev_screen = prev_ndc * 0.5 + 0.5;
 		vec2 reproject_offset = prev_screen - screen_uv;
@@ -288,13 +280,28 @@ void main() {
 		imageStore(accum_color_a, uv, accum_result);
 	}
 
+	// Bicubic 徑向模糊（SSC2 做法）
+	if (params.blur_power > 0.0 && params.blur_quality > 0.0) {
+		float blur_h = params.blur_power;
+		float blur_v = params.blur_power;
+		accum_result = radial_blur(accum_result, uv, size, blur_h, blur_v, params.blur_quality);
+	}
+
 	// 大氣散射
 	vec3 atmo = sample_atmospherics(ray_dir, params.sun_direction, linear_depth, accum_result.a, params.atmospheric_density);
 
-	// 合成到螢幕
-	vec4 screen_color = imageLoad(screen_image, uv);
-	vec3 final_color = mix(screen_color.rgb, accum_result.rgb, accum_result.a);
-	final_color += atmo;
+	// 合成到螢幕（支援可變解析度：每個 thread 寫 NxN 像素）
+	int res_scale = max(1, int(params.resolution_scale));
+	vec3 blended_cloud = accum_result.rgb + atmo;
+	float final_alpha = accum_result.a;
 
-	imageStore(screen_image, uv, vec4(final_color, screen_color.a));
+	for (int dy = 0; dy < res_scale; dy++) {
+		for (int dx = 0; dx < res_scale; dx++) {
+			ivec2 write_uv = uv * res_scale + ivec2(dx, dy);
+			if (write_uv.x >= size.x || write_uv.y >= size.y) continue;
+			vec4 screen_color = imageLoad(screen_image, write_uv);
+			vec3 final_color = mix(screen_color.rgb, blended_cloud, final_alpha);
+			imageStore(screen_image, write_uv, vec4(final_color, screen_color.a));
+		}
+	}
 }

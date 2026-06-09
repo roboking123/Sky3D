@@ -65,6 +65,26 @@ layout(set = 2, binding = 0, std140) uniform CloudParams {
 #define param_density          ub.v10.z
 #define param_absorption       ub.v10.w
 
+// === set 3: 光源資料（SSC2 做法） ===
+struct DirLight {
+	vec4 direction; // xyz = 方向, w = 陰影步數
+	vec4 color;     // rgb = 顏色, a = 強度
+};
+
+struct PtLight {
+	vec4 position; // xyz = 位置, w = 半徑
+	vec4 color;    // rgb = 顏色, a = 強度
+};
+
+layout(set = 3, binding = 0, std140) uniform LightsBuffer {
+	DirLight dir_lights[4];
+	PtLight pt_lights[16];
+	float dir_light_count;
+	float pt_light_count;
+	float _lpad0;
+	float _lpad1;
+} lights;
+
 // ============================================================================
 // 常數
 // ============================================================================
@@ -284,8 +304,8 @@ vec4 march(vec3 pos, vec3 end_pos, vec3 dir, int max_steps) {
 
 	float t_dist = SKY_T_RADIUS - SKY_B_RADIUS;
 	float lss = t_dist / 64.0;
-	vec3 ldir = normalize(param_sun_direction);
 	int shadow_step_count = int(param_shadow_steps);
+	int num_dir_lights = int(lights.dir_light_count);
 
 	float T = 1.0;
 	float alpha = 0.0;
@@ -293,24 +313,37 @@ vec4 march(vec3 pos, vec3 end_pos, vec3 dir, int max_steps) {
 	float total_ao = 0.0;
 	float ao_samples = 0.0;
 
-	float costheta = dot(ldir, dir);
-	float phase = max(
-		max(henyey_greenstein(costheta, 0.6),
-		    henyey_greenstein(costheta, 0.4 - 1.4 * ldir.y)),
-		henyey_greenstein(costheta, -0.2)
-	);
+	// 預計算每個方向光的相位函數和顏色
+	vec3 light_dirs[4];
+	float light_phases[4];
+	vec3 light_colors[4];
+	float light_sun_factors[4];
 
-	// 日夜顏色
-	float sun_h = param_sun_direction.y;
+	// 日夜顏色（用主光源 = 第一個方向光）
+	vec3 primary_dir = normalize(lights.dir_lights[0].direction.xyz);
+	float sun_h = primary_dir.y;
 	float day_amt = smoothstep(-0.1, 0.3, sun_h);
 	float night_amt = smoothstep(0.1, -0.5, sun_h);
 	float horiz_amt = max(1.0 - day_amt - night_amt, 0.0);
-	vec3 sun_color = param_cloud_day_color * day_amt
+	vec3 base_color = param_cloud_day_color * day_amt
 	               + param_cloud_horizon_color * horiz_amt
 	               + param_cloud_night_color * night_amt;
 
-	vec3 ambient_top = sun_color * 0.15;
-	vec3 ambient_bottom = sun_color * 0.08;
+	for (int li = 0; li < num_dir_lights && li < 4; li++) {
+		light_dirs[li] = normalize(lights.dir_lights[li].direction.xyz);
+		float ct = dot(light_dirs[li], dir);
+		light_phases[li] = max(
+			max(henyey_greenstein(ct, 0.6),
+			    henyey_greenstein(ct, 0.4 - 1.4 * light_dirs[li].y)),
+			henyey_greenstein(ct, -0.2)
+		);
+		float up_weight = smoothstep(-0.03, 0.07, light_dirs[li].y);
+		light_colors[li] = lights.dir_lights[li].color.rgb * lights.dir_lights[li].color.a * up_weight;
+		light_sun_factors[li] = clamp(light_dirs[li].y + 0.3, 0.0, 1.0);
+	}
+
+	vec3 ambient_top = base_color * 0.15;
+	vec3 ambient_bottom = base_color * 0.08;
 
 	// 天氣圖取樣
 	vec2 weather_uv = vec3_to_oct(dir.xzy) + param_weather_pos;
@@ -339,25 +372,31 @@ vec4 march(vec3 pos, vec3 end_pos, vec3 dir, int max_steps) {
 			// 自適應步長：密度高時步長縮短（SSC2 做法）
 			current_step = mix(base_step * 0.5, base_step, 1.0 - pow(t, 0.1));
 
-			// 光照步進
-			vec3 lp = p;
-			float cd = 0.0;
+			// 多光源光照（SSC2 做法：每個方向光獨立步進）
+			vec3 total_light = vec3(0.0);
+			for (int li = 0; li < num_dir_lights && li < 4; li++) {
+				vec3 lp = p;
+				float cd = 0.0;
+				int steps_this_light = min(shadow_step_count, int(lights.dir_lights[li].direction.w));
 
-			for (int j = 0; j < shadow_step_count; j++) {
-				lp += (ldir + RANDOM_VECTORS[j % 6] * float(j)) * lss;
-				cd += sample_density(lp, weather_sample, float(j), true);
+				for (int j = 0; j < steps_this_light; j++) {
+					lp += (light_dirs[li] + RANDOM_VECTORS[j % 6] * float(j)) * lss;
+					cd += sample_density(lp, weather_sample, float(j), true);
+				}
+
+				// 遠距取樣
+				lp = p + light_dirs[li] * 18.0 * lss;
+				float lh = get_height_fraction(length(lp));
+				float lt = pow(sample_density(lp, weather_sample, 5.0, true), (1.0 - lh) * 0.8 + 0.5);
+				cd += lt;
+
+				// Beer-Lambert + 粉末效應
+				float beers = exp(-param_density * cd * lss * 3.0);
+				float powder = 1.0 - exp(-param_density * cd * lss * 3.0 * 2.0);
+				float beers_total = 2.0 * beers * powder;
+
+				total_light += beers_total * light_colors[li] * light_sun_factors[li] * light_phases[li];
 			}
-
-			// 遠距取樣
-			lp = p + ldir * 18.0 * lss;
-			float lh = get_height_fraction(length(lp));
-			float lt = pow(sample_density(lp, weather_sample, 5.0, true), (1.0 - lh) * 0.8 + 0.5);
-			cd += lt;
-
-			// Beer-Lambert + 粉末效應
-			float beers = exp(-param_density * cd * lss * 3.0);
-			float powder = 1.0 - exp(-param_density * cd * lss * 3.0 * 2.0);
-			float beers_total = 2.0 * beers * powder;
 
 			// AO 取樣（SSC2）
 			if (param_ao_strength > 0.0) {
@@ -366,9 +405,8 @@ vec4 march(vec3 pos, vec3 end_pos, vec3 dir, int max_steps) {
 			}
 
 			vec3 ambient = mix(ambient_bottom, ambient_top, smoothstep(0.0, 1.0, height_fraction));
-			float sun_factor = clamp(param_sun_direction.y + 0.3, 0.0, 1.0);
 			alpha += (1.0 - dt) * (1.0 - alpha);
-			vec3 radiance = (ambient + beers_total * sun_color * sun_factor * phase) * t;
+			vec3 radiance = (ambient + total_light) * t;
 			L += T * (radiance - radiance * dt) / max(0.0000001, t);
 			T *= dt;
 		} else {

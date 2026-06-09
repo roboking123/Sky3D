@@ -24,6 +24,8 @@ var noise_sampler: RID
 # uniform buffer（取代 push constant）
 var params_buffer: RID = RID()
 var params_uniform_set: RID = RID()
+var lights_buffer: RID = RID()
+var lights_uniform_set: RID = RID()
 
 var texture_to_update: int = 0
 var texture_to_blend_from: int = 1
@@ -75,8 +77,19 @@ var march_steps: float = 128.0
 var shadow_steps: float = 6.0
 
 # Uniform buffer 大小（對齊到 std140）
-# 14 個 vec4 = 224 bytes，對齊到 256
 const PARAMS_BUFFER_SIZE := 256
+# Lights buffer: 4 DirLight(32B each) + 16 PtLight(32B each) + 16B counts = 656B
+const LIGHTS_BUFFER_SIZE := 672
+
+# 光源追蹤
+var directional_lights: Array[Dictionary] = []  # [{direction: Vector3, color: Color, energy: float, shadow_steps: int}]
+var point_lights: Array[Dictionary] = []  # [{position: Vector3, color: Color, energy: float, radius: float}]
+
+# 雲密度位置查詢（SSC2 做法）
+var _density_queries: Array[Vector3] = []
+var _density_callbacks: Array[Callable] = []
+var _density_querying: bool = false
+var _density_resetting: bool = false
 
 
 func initialize(p_texture_size: int = 768, p_frames: int = 64) -> void:
@@ -116,6 +129,9 @@ func cleanup() -> void:
 		if params_buffer.is_valid():
 			rd.free_rid(params_buffer)
 			params_buffer = RID()
+		if lights_buffer.is_valid():
+			rd.free_rid(lights_buffer)
+			lights_buffer = RID()
 
 
 func get_blend_from_texture() -> Texture2DRD:
@@ -246,12 +262,14 @@ func _render_process(p_texture_to_update: int) -> void:
 	data.encode_float(idx, absorption); idx += 4
 
 	rd.buffer_update(params_buffer, 0, PARAMS_BUFFER_SIZE, data)
+	_update_lights_buffer()
 
 	var compute_list := rd.compute_list_begin()
 	rd.compute_list_bind_compute_pipeline(compute_list, pipeline)
 	rd.compute_list_bind_uniform_set(compute_list, texture_set[p_texture_to_update], 0)
 	rd.compute_list_bind_uniform_set(compute_list, noise_uniform_set, 1)
 	rd.compute_list_bind_uniform_set(compute_list, params_uniform_set, 2)
+	rd.compute_list_bind_uniform_set(compute_list, lights_uniform_set, 3)
 	rd.compute_list_dispatch(compute_list, num_workgroups, num_workgroups, 1)
 	rd.compute_list_end()
 
@@ -284,6 +302,15 @@ func _initialize_compute(p_texture_size: int) -> void:
 	params_uniform.binding = 0
 	params_uniform.add_id(params_buffer)
 	params_uniform_set = rd.uniform_set_create([params_uniform], shader_rd, 2)
+
+	# 光源 uniform buffer (set 3)
+	lights_buffer = rd.uniform_buffer_create(LIGHTS_BUFFER_SIZE)
+	var lights_uniform := RDUniform.new()
+	lights_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+	lights_uniform.binding = 0
+	lights_uniform.add_id(lights_buffer)
+	lights_uniform_set = rd.uniform_set_create([lights_uniform], shader_rd, 3)
+	_update_lights_buffer()
 
 	# 三重緩衝貼圖 (set 0)
 	var tf := RDTextureFormat.new()
@@ -393,6 +420,117 @@ func _create_noise_uniform_set() -> RID:
 	uniforms.push_back(u4)
 
 	return rd.uniform_set_create(uniforms, shader_rd, 1)
+
+
+## 查詢指定世界位置的雲密度。結果透過 callback 非同步回傳。
+## callback 簽名：func(position: Vector3, density: float) -> void
+func query_density(position: Vector3, callback: Callable) -> void:
+	if _density_queries.size() >= 32:
+		push_warning("VolumetricCloudRenderer: 密度查詢佇列已滿（最多 32 個）")
+		return
+	_density_queries.append(position)
+	_density_callbacks.append(callback)
+
+
+## 同步查詢（近似值，用天氣圖做快速估算，不走 GPU）
+## 回傳 0.0~1.0 的覆蓋率近似值
+func query_density_sync(world_position: Vector3) -> float:
+	if not generated_weather_map:
+		return 0.0
+	# 把世界位置轉換成天氣圖 UV
+	var weather_uv := Vector2(
+		world_position.x * weather_scale + 0.5 + weather_pos.x,
+		world_position.z * weather_scale + 0.5 + weather_pos.y
+	)
+	weather_uv = Vector2(fmod(weather_uv.x, 1.0), fmod(weather_uv.y, 1.0))
+	if weather_uv.x < 0: weather_uv.x += 1.0
+	if weather_uv.y < 0: weather_uv.y += 1.0
+
+	# 取樣天氣圖
+	var img: Image = generated_weather_map.get_image()
+	if not img:
+		return 0.0
+	var px: int = clampi(int(weather_uv.x * img.get_width()), 0, img.get_width() - 1)
+	var py: int = clampi(int(weather_uv.y * img.get_height()), 0, img.get_height() - 1)
+	var weather_color: Color = img.get_pixel(px, py)
+	# B 通道 = 覆蓋率
+	return weather_color.b * coverage
+
+
+## 處理佇列中的密度查詢（每幀呼叫）
+func process_density_queries() -> void:
+	while _density_queries.size() > 0:
+		var pos: Vector3 = _density_queries[0]
+		var cb: Callable = _density_callbacks[0]
+		_density_queries.remove_at(0)
+		_density_callbacks.remove_at(0)
+		var d: float = query_density_sync(pos)
+		cb.call(pos, d)
+
+
+func _update_lights_buffer() -> void:
+	if not rd or not lights_buffer.is_valid():
+		return
+	var data := PackedByteArray()
+	data.resize(LIGHTS_BUFFER_SIZE)
+	var idx: int = 0
+
+	# 方向光（4 個，每個 32 bytes = 2 × vec4）
+	for i in range(4):
+		if i < directional_lights.size():
+			var light: Dictionary = directional_lights[i]
+			var dir: Vector3 = light.get("direction", Vector3(0, 1, 0))
+			var col: Color = light.get("color", Color.WHITE)
+			var energy: float = light.get("energy", 1.0)
+			var steps: int = light.get("shadow_steps", 6)
+			data.encode_float(idx, dir.x); idx += 4
+			data.encode_float(idx, dir.y); idx += 4
+			data.encode_float(idx, dir.z); idx += 4
+			data.encode_float(idx, float(steps)); idx += 4
+			data.encode_float(idx, col.r); idx += 4
+			data.encode_float(idx, col.g); idx += 4
+			data.encode_float(idx, col.b); idx += 4
+			data.encode_float(idx, col.a * energy); idx += 4
+		else:
+			# 預設太陽光
+			if i == 0:
+				data.encode_float(idx, sun_direction.x); idx += 4
+				data.encode_float(idx, sun_direction.y); idx += 4
+				data.encode_float(idx, sun_direction.z); idx += 4
+				data.encode_float(idx, shadow_steps); idx += 4
+				data.encode_float(idx, 1.0); idx += 4
+				data.encode_float(idx, 1.0); idx += 4
+				data.encode_float(idx, 1.0); idx += 4
+				data.encode_float(idx, 1.0); idx += 4
+			else:
+				idx += 32
+
+	# 點光源（16 個，每個 32 bytes = 2 × vec4）
+	for i in range(16):
+		if i < point_lights.size():
+			var light: Dictionary = point_lights[i]
+			var pos: Vector3 = light.get("position", Vector3.ZERO)
+			var col: Color = light.get("color", Color.WHITE)
+			var energy: float = light.get("energy", 1.0)
+			var radius: float = light.get("radius", 100.0)
+			data.encode_float(idx, pos.x); idx += 4
+			data.encode_float(idx, pos.y); idx += 4
+			data.encode_float(idx, pos.z); idx += 4
+			data.encode_float(idx, radius); idx += 4
+			data.encode_float(idx, col.r); idx += 4
+			data.encode_float(idx, col.g); idx += 4
+			data.encode_float(idx, col.b); idx += 4
+			data.encode_float(idx, col.a * energy); idx += 4
+		else:
+			idx += 32
+
+	# counts (4 floats = 1 vec4)
+	data.encode_float(idx, float(maxi(directional_lights.size(), 1))); idx += 4
+	data.encode_float(idx, float(point_lights.size())); idx += 4
+	data.encode_float(idx, 0.0); idx += 4
+	data.encode_float(idx, 0.0); idx += 4
+
+	rd.buffer_update(lights_buffer, 0, LIGHTS_BUFFER_SIZE, data)
 
 
 func _generate_weather_map() -> void:

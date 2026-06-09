@@ -257,6 +257,14 @@ wind_direction = 1.5708
 cirrus_visible = false
 cumulus_visible = false
 volumetric_visible = true
+vol_coverage = 0.2
+vol_curl_strength = null
+vol_curl_scale = null
+vol_wind_shear_power = null
+vol_wind_shear_range = null
+vol_ao_strength = null
+vol_march_steps = null
+vol_shadow_steps = null
 
 [node name="TimeOfDay" type="Node" parent="Sky3D" unique_id=514872795]
 script = ExtResource("3")

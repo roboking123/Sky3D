@@ -158,6 +158,8 @@ func process_tick(delta: float) -> void:
 		_vol_renderer.weather_pos += delta * 0.001 * wind_norm * _cloud_speed
 		_vol_renderer.current_time = Time.get_ticks_msec() / 1000.0
 		_vol_renderer.wind_direction = wind_norm
+		_sync_volumetric_lights()
+		_vol_renderer.process_density_queries()
 		_vol_renderer.render_frame()
 		# 舊路徑：QuadMesh 顯示（保留向後相容）
 		volumetric_material.set_shader_parameter("blend_from_texture", _vol_renderer.get_blend_from_texture())
@@ -951,6 +953,55 @@ func _check_cloud_processing() -> void:
 
 
 
+## 同步光源到體積雲 renderer
+func _sync_volumetric_lights() -> void:
+	if not _vol_renderer:
+		return
+	_vol_renderer.directional_lights.clear()
+
+	# 太陽（永遠是第一個方向光）
+	if _sun_light_node and _sun_light_node.visible:
+		_vol_renderer.directional_lights.append({
+			"direction": _sun_transform.origin,
+			"color": _sun_light_node.light_color,
+			"energy": _sun_light_node.light_energy,
+			"shadow_steps": int(vol_shadow_steps)
+		})
+
+	# 月亮
+	if _moon_light_node and _moon_light_node.visible and _moon_light_node.light_energy > 0.01:
+		_vol_renderer.directional_lights.append({
+			"direction": _moon_transform.origin,
+			"color": _moon_light_node.light_color,
+			"energy": _moon_light_node.light_energy,
+			"shadow_steps": maxi(int(vol_shadow_steps) / 2, 2)
+		})
+
+	# 額外方向光
+	for path in vol_extra_directional_lights:
+		var node: DirectionalLight3D = get_node_or_null(path) as DirectionalLight3D
+		if node and node.visible:
+			var look_dir: Vector3 = node.global_transform.basis.z.normalized()
+			_vol_renderer.directional_lights.append({
+				"direction": look_dir,
+				"color": node.light_color,
+				"energy": node.light_energy,
+				"shadow_steps": int(vol_shadow_steps)
+			})
+
+	# 點光源
+	_vol_renderer.point_lights.clear()
+	for path in vol_point_lights:
+		var node: OmniLight3D = get_node_or_null(path) as OmniLight3D
+		if node and node.visible:
+			_vol_renderer.point_lights.append({
+				"position": node.global_position,
+				"color": node.light_color,
+				"energy": node.light_energy,
+				"radius": node.omni_range
+			})
+
+
 ## 把 VolumetricCloudEffect 註冊到場景的 Compositor
 func _register_compositor_effect() -> void:
 	if not _vol_effect or not environment:
@@ -1269,6 +1320,32 @@ func _recursive_find_env(node: Node) -> WorldEnvironment:
 		vol_ao_strength = value
 		if _vol_renderer:
 			_vol_renderer.ao_strength = value
+
+@export_subgroup("Multi-Light")
+
+## 額外的方向光（太陽/月亮之外的）
+@export var vol_extra_directional_lights: Array[NodePath] = []:
+	set(value):
+		vol_extra_directional_lights = value
+
+## 影響雲的點光源
+@export var vol_point_lights: Array[NodePath] = []:
+	set(value):
+		vol_point_lights = value
+
+## 反射紋理輸出到 global shader parameter（留空 = 不輸出）
+@export var vol_reflections_param: String = "":
+	set(value):
+		vol_reflections_param = value
+		if _vol_effect:
+			_vol_effect.reflections_param_name = value
+
+## 合成解析度縮放（0=原生, 1=半, 2=四分之一, 3=八分之一）
+@export_enum("Native:0", "Half:1", "Quarter:2", "Eighth:3") var vol_resolution_scale: int = 1:
+	set(value):
+		vol_resolution_scale = value
+		if _vol_effect:
+			_vol_effect.resolution_scale = value
 
 @export_subgroup("Quality")
 

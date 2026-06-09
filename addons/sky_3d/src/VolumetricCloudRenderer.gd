@@ -87,11 +87,13 @@ const LIGHTS_BUFFER_SIZE := 672
 var directional_lights: Array[Dictionary] = []  # [{direction: Vector3, color: Color, energy: float, shadow_steps: int}]
 var point_lights: Array[Dictionary] = []  # [{position: Vector3, color: Color, energy: float, radius: float}]
 
-# 雲密度位置查詢（SSC2 做法）
+# 雲密度查詢 — 精確版讀回八面體結果貼圖的實際 alpha（走完整管線的真實密度）
 var _density_queries: Array[Vector3] = []
 var _density_callbacks: Array[Callable] = []
-var _density_querying: bool = false
-var _density_resetting: bool = false
+var _density_readback_bytes: PackedByteArray = PackedByteArray()  # 上次讀回的 rgba16f raw bytes
+var _density_readback_dim: int = 0                                # 讀回貼圖的邊長
+var _density_readback_pending: bool = false                       # readback 排程中
+var _density_readback_fresh: bool = false                         # 有新資料待消費
 
 
 func initialize(p_texture_size: int = 768, p_frames: int = 64) -> void:
@@ -397,10 +399,10 @@ func _initialize_compute(p_texture_size: int) -> void:
 		RenderingDevice.TEXTURE_USAGE_COLOR_ATTACHMENT_BIT +
 		RenderingDevice.TEXTURE_USAGE_STORAGE_BIT +
 		RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT +
-		RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT
+		RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT +
+		# 密度查詢需要把貼圖讀回 CPU（texture_get_data_async）
+		RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
 	)
-	if Engine.is_editor_hint():
-		tf.usage_bits += RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
 
 	textures.clear()
 	for i in range(3):
@@ -482,7 +484,9 @@ func _on_noise_set_fail() -> RID:
 	return RID()
 
 
-## 查詢指定世界位置的雲密度。結果透過 callback 非同步回傳。
+## 查詢某位置（方向）的雲密度。精確版：非同步讀回八面體結果貼圖的實際 alpha，
+## 那是走完整 ray-march 管線（噪音/curl/侵蝕/高度梯度）後的真實積分密度。
+## 八面體模型無深度，所以查的是「該方向的雲量」，position 取其方向。
 ## callback 簽名：func(position: Vector3, density: float) -> void
 func query_density(position: Vector3, callback: Callable) -> void:
 	if _density_queries.size() >= 32:
@@ -492,12 +496,30 @@ func query_density(position: Vector3, callback: Callable) -> void:
 	_density_callbacks.append(callback)
 
 
-## 同步查詢（近似值，用天氣圖做快速估算，不走 GPU）
-## 回傳 0.0~1.0 的覆蓋率近似值
+## 從已讀回的八面體 alpha 取樣某方向的密度。回傳 -1 表示尚無讀回資料。
+func sample_octahedral_density(dir: Vector3) -> float:
+	if _density_readback_bytes.is_empty() or _density_readback_dim == 0:
+		return -1.0
+	var n := dir.normalized()
+	n.y = maxf(0.001, n.y)
+	n = n.normalized()
+	# 跟 display/composite shader 一致：vec3_to_oct(dir.xzy)
+	var uv := _vec3_to_oct(Vector3(n.x, n.z, n.y))
+	var dim := _density_readback_dim
+	var px := clampi(int(uv.x * float(dim)), 0, dim - 1)
+	var py := clampi(int(uv.y * float(dim)), 0, dim - 1)
+	# rgba16f：每像素 8 bytes，alpha 在 byte offset 6
+	var offset := (py * dim + px) * 8 + 6
+	if offset + 2 > _density_readback_bytes.size():
+		return -1.0
+	return _density_readback_bytes.decode_half(offset)
+
+
+## 同步近似查詢（用天氣圖覆蓋率，平滑、不含噪音侵蝕細節，最省、不走 GPU readback）。
+## 回傳 0.0~1.0 的覆蓋率近似值。要精確值用 query_density()。
 func query_density_sync(world_position: Vector3) -> float:
 	if not generated_weather_map:
 		return 0.0
-	# 把世界位置轉換成天氣圖 UV
 	var weather_uv := Vector2(
 		world_position.x * weather_scale + 0.5 + weather_pos.x,
 		world_position.z * weather_scale + 0.5 + weather_pos.y
@@ -506,26 +528,76 @@ func query_density_sync(world_position: Vector3) -> float:
 	if weather_uv.x < 0: weather_uv.x += 1.0
 	if weather_uv.y < 0: weather_uv.y += 1.0
 
-	# 取樣天氣圖
 	var img: Image = generated_weather_map.get_image()
 	if not img:
 		return 0.0
 	var px: int = clampi(int(weather_uv.x * img.get_width()), 0, img.get_width() - 1)
 	var py: int = clampi(int(weather_uv.y * img.get_height()), 0, img.get_height() - 1)
 	var weather_color: Color = img.get_pixel(px, py)
-	# B 通道 = 覆蓋率
 	return weather_color.b * coverage
 
 
-## 處理佇列中的密度查詢（每幀呼叫）
+## 處理佇列中的密度查詢（每幀呼叫）。非同步：先排 readback，資料回來下一幀才回答。
 func process_density_queries() -> void:
+	if _density_queries.is_empty():
+		return
+
+	# 沒有新資料 → 排一次 readback，等下一幀
+	if not _density_readback_fresh:
+		if not _density_readback_pending:
+			_density_readback_pending = true
+			RenderingServer.call_on_render_thread(_do_density_readback)
+		return
+
+	# 有新資料，回答所有排隊查詢
 	while _density_queries.size() > 0:
 		var pos: Vector3 = _density_queries[0]
 		var cb: Callable = _density_callbacks[0]
 		_density_queries.remove_at(0)
 		_density_callbacks.remove_at(0)
-		var d: float = query_density_sync(pos)
-		cb.call(pos, d)
+		var d: float = sample_octahedral_density(pos)
+		if d < 0.0:
+			d = query_density_sync(pos)  # 還沒讀回時用近似後備
+		cb.call(pos, clampf(d, 0.0, 1.0))
+	_density_readback_fresh = false  # 用過，下批查詢再讀新的
+
+
+# 渲染執行緒：把當前完成的八面體貼圖非同步讀回 CPU
+func _do_density_readback() -> void:
+	if not can_run or not rd:
+		_density_readback_pending = false
+		return
+	var tex: RID = texture_rd[texture_to_blend_from]
+	if not tex.is_valid():
+		_density_readback_pending = false
+		return
+	_density_readback_dim = texture_size
+	rd.texture_get_data_async(tex, 0, _on_density_readback)
+
+
+# readback 完成回呼（render thread）
+func _on_density_readback(bytes: PackedByteArray) -> void:
+	_density_readback_bytes = bytes
+	_density_readback_pending = false
+	_density_readback_fresh = true
+
+
+# 八面體編碼（跟 shader 的 vec3_to_oct 一致），方向 → UV
+func _vec3_to_oct(e: Vector3) -> Vector2:
+	var s := absf(e.x) + absf(e.y) + absf(e.z)
+	if s == 0.0:
+		return Vector2(0.5, 0.5)
+	e /= s
+	var exy := Vector2(e.x, e.y)
+	if e.z < 0.0:
+		var sx := 1.0 if e.x >= 0.0 else -1.0
+		var sy := 1.0 if e.y >= 0.0 else -1.0
+		exy = Vector2((1.0 - absf(e.y)) * sx, (1.0 - absf(e.x)) * sy)
+	var n := Vector2()
+	n.y = exy.y * 0.5 + 0.5
+	n.x = exy.x * 0.5 + n.y
+	n.y = exy.x * -0.5 + n.y
+	return n
 
 
 func _update_lights_buffer() -> void:

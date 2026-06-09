@@ -188,17 +188,18 @@ func render_full() -> void:
 func _render_process(p_texture_to_update: int) -> void:
 	if not can_run:
 		return
-	if not noise_uniform_set.is_valid():
-		printerr("VolumetricCloudRenderer: noise_uniform_set 無效 (RID=", noise_uniform_set, ")")
+	# 每幀重建噪音 uniform set（紋理 RID 可能因重匯入而失效）
+	if not rd.uniform_set_is_valid(noise_uniform_set):
+		noise_uniform_set = _create_noise_uniform_set()
+	if not rd.uniform_set_is_valid(noise_uniform_set):
 		return
-	if not params_uniform_set.is_valid():
-		printerr("VolumetricCloudRenderer: params_uniform_set 無效")
+	if not rd.uniform_set_is_valid(params_uniform_set):
 		return
-	if not lights_uniform_set.is_valid():
-		printerr("VolumetricCloudRenderer: lights_uniform_set 無效")
+	if not rd.uniform_set_is_valid(lights_uniform_set):
 		return
-	if not texture_set[p_texture_to_update].is_valid():
-		printerr("VolumetricCloudRenderer: texture_set[", p_texture_to_update, "] 無效")
+	if not rd.uniform_set_is_valid(texture_set[p_texture_to_update]):
+		texture_set[p_texture_to_update] = _create_texture_uniform_set(texture_rd[p_texture_to_update])
+	if not rd.uniform_set_is_valid(texture_set[p_texture_to_update]):
 		return
 	textures[p_texture_to_update].texture_rd_rid = texture_rd[p_texture_to_update]
 

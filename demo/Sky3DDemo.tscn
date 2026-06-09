@@ -11,6 +11,7 @@
 [ext_resource type="Texture2D" uid="uid://2r8ylu6rg5dp" path="res://addons/sky_3d/assets/thirdparty/textures/moon/MoonMap.png" id="6_v8wrf"]
 [ext_resource type="Texture2D" uid="uid://djpfuyxkryegn" path="res://addons/sky_3d/assets/textures/noise.jpg" id="7_d0ed4"]
 [ext_resource type="Texture2D" uid="uid://bm7dot7t7u1q4" path="res://addons/sky_3d/assets/thirdparty/textures/milkyway/StarField.jpg" id="8_humls"]
+[ext_resource type="Script" uid="uid://bsu1dmpbm31ag" path="res://addons/sky_3d/src/VolumetricCloudEffect.gd" id="9_0j4pb"]
 
 [sub_resource type="GDScript" id="GDScript_v8wrf"]
 script/source = "extends Node3D
@@ -202,6 +203,20 @@ tonemap_white = 6.0
 
 [sub_resource type="CameraAttributesPractical" id="CameraAttributesPractical_d0ed4"]
 
+[sub_resource type="CompositorEffect" id="CompositorEffect_1g8sw"]
+resource_local_to_scene = false
+resource_name = ""
+enabled = true
+effect_callback_type = 3
+access_resolved_color = true
+access_resolved_depth = true
+needs_motion_vectors = true
+needs_normal_roughness = false
+script = ExtResource("9_0j4pb")
+
+[sub_resource type="Compositor" id="Compositor_d0ed4"]
+compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_1g8sw")])
+
 [node name="Main" type="Node3D" unique_id=1085262622]
 
 [node name="PrimitivesCity" parent="." unique_id=350283548 instance=ExtResource("2")]
@@ -223,6 +238,7 @@ origin_offset = Vector3(0, 5, 0)
 [node name="Sky3D" type="WorldEnvironment" parent="." unique_id=484779821]
 environment = SubResource("Environment_1g8sw")
 camera_attributes = SubResource("CameraAttributesPractical_d0ed4")
+compositor = SubResource("Compositor_d0ed4")
 script = ExtResource("2_cejat")
 editor_time_enabled = false
 game_time_enabled = false
@@ -257,14 +273,6 @@ wind_direction = 1.5708
 cirrus_visible = false
 cumulus_visible = false
 volumetric_visible = true
-vol_coverage = 0.2
-vol_curl_strength = null
-vol_curl_scale = null
-vol_wind_shear_power = null
-vol_wind_shear_range = null
-vol_ao_strength = null
-vol_march_steps = null
-vol_shadow_steps = null
 
 [node name="TimeOfDay" type="Node" parent="Sky3D" unique_id=514872795]
 script = ExtResource("3")

@@ -188,7 +188,17 @@ func render_full() -> void:
 func _render_process(p_texture_to_update: int) -> void:
 	if not can_run:
 		return
-	if not noise_uniform_set.is_valid() or not params_uniform_set.is_valid() or not lights_uniform_set.is_valid():
+	if not noise_uniform_set.is_valid():
+		printerr("VolumetricCloudRenderer: noise_uniform_set 無效 (RID=", noise_uniform_set, ")")
+		return
+	if not params_uniform_set.is_valid():
+		printerr("VolumetricCloudRenderer: params_uniform_set 無效")
+		return
+	if not lights_uniform_set.is_valid():
+		printerr("VolumetricCloudRenderer: lights_uniform_set 無效")
+		return
+	if not texture_set[p_texture_to_update].is_valid():
+		printerr("VolumetricCloudRenderer: texture_set[", p_texture_to_update, "] 無效")
 		return
 	textures[p_texture_to_update].texture_rd_rid = texture_rd[p_texture_to_update]
 

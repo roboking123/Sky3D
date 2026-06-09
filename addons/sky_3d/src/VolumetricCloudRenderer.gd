@@ -19,7 +19,9 @@ var texture_set: Array = [RID(), RID(), RID()]
 var textures: Array[Texture2DRD] = []
 
 var noise_uniform_set: RID = RID()
-var noise_sampler: RID
+var noise_sampler: RID = RID()        # 重複取樣器（3D 噪音用），init 建一次重用
+var clamp_sampler: RID = RID()        # 夾邊取樣器（梯度紋理用），init 建一次重用
+var _noise_fail_count: int = 0        # 連續建立失敗計數，用來節流錯誤訊息
 
 # uniform buffer（取代 push constant）
 var params_buffer: RID = RID()
@@ -126,6 +128,9 @@ func cleanup() -> void:
 		if noise_sampler.is_valid():
 			rd.free_rid(noise_sampler)
 			noise_sampler = RID()
+		if clamp_sampler.is_valid():
+			rd.free_rid(clamp_sampler)
+			clamp_sampler = RID()
 		if params_buffer.is_valid():
 			rd.free_rid(params_buffer)
 			params_buffer = RID()
@@ -185,21 +190,50 @@ func render_full() -> void:
 # 渲染執行緒
 # ============================================================================
 
+# 確保這一幀要用的 uniform set 都有效，必要時重建。回傳是否就緒。
+#
+# 為什麼 noise set（set 1）需要延遲建立 + 失效重建，其他 set 不用：
+#   set 1 綁的是 RenderingServer.texture_get_rd_texture() 拿到的「共享 view RID」，
+#   那不是我們擁有的 RID。perlworlnoise/worlnoise 是 vram_texture=true 的 BPTC 壓縮
+#   3D 紋理，開機後才延遲上傳到 VRAM。引擎補完上傳（重建底層 RD view）時會釋放舊
+#   view，而 RenderingDevice.free 會「遞迴釋放所有依賴它的 uniform set」
+#   （Godot issue #103073 維護者確認、#118292 印證 texture_replace 路徑），於是
+#   set 1 在我們建好後、首次 dispatch 前被引擎連帶作廢。
+#
+#   這是 Godot CompositorEffect 社群的標準應對：用引擎管理的紋理時，把含 sampled
+#   紋理的 uniform set 視為可被引擎作廢，dispatch 前驗證、失效就重建。失效實務上只
+#   發生在開機延遲上傳完成那一次，之後穩定，每幀只多一次 O(1) 的 is_valid 檢查。
+#
+#   set 0/2/3（輸出貼圖、參數、光源）綁的是我們自己 rd.texture_create /
+#   uniform_buffer_create 出來的 RID，生命週期歸我們管，不會被引擎作廢，故只在
+#   初始化建一次即可。
+func _ensure_uniform_sets(p_texture_to_update: int) -> bool:
+	# set 1：noise（引擎共享 RID，可能被作廢 → 延遲建立 + 失效重建）
+	if not rd.uniform_set_is_valid(noise_uniform_set):
+		noise_uniform_set = _create_noise_uniform_set()
+		if not rd.uniform_set_is_valid(noise_uniform_set):
+			# 紋理尚未就緒，安靜跳過這一幀（下一幀會再試）
+			return false
+
+	# set 2/3：我們擁有的 buffer，理論上恆有效；無效代表初始化出問題，直接跳過
+	if not rd.uniform_set_is_valid(params_uniform_set):
+		return false
+	if not rd.uniform_set_is_valid(lights_uniform_set):
+		return false
+
+	# set 0：我們擁有的輸出貼圖，恆有效；防禦性重建以防萬一
+	if not rd.uniform_set_is_valid(texture_set[p_texture_to_update]):
+		texture_set[p_texture_to_update] = _create_texture_uniform_set(texture_rd[p_texture_to_update])
+		if not rd.uniform_set_is_valid(texture_set[p_texture_to_update]):
+			return false
+
+	return true
+
+
 func _render_process(p_texture_to_update: int) -> void:
 	if not can_run:
 		return
-	# 每幀重建噪音 uniform set（紋理 RID 可能因重匯入而失效）
-	if not rd.uniform_set_is_valid(noise_uniform_set):
-		noise_uniform_set = _create_noise_uniform_set()
-	if not rd.uniform_set_is_valid(noise_uniform_set):
-		return
-	if not rd.uniform_set_is_valid(params_uniform_set):
-		return
-	if not rd.uniform_set_is_valid(lights_uniform_set):
-		return
-	if not rd.uniform_set_is_valid(texture_set[p_texture_to_update]):
-		texture_set[p_texture_to_update] = _create_texture_uniform_set(texture_rd[p_texture_to_update])
-	if not rd.uniform_set_is_valid(texture_set[p_texture_to_update]):
+	if not _ensure_uniform_sets(p_texture_to_update):
 		return
 	textures[p_texture_to_update].texture_rd_rid = texture_rd[p_texture_to_update]
 
@@ -311,12 +345,26 @@ func _initialize_compute(p_texture_size: int) -> void:
 		return
 	pipeline = rd.compute_pipeline_create(shader_rd)
 
-	# 噪音 uniform set (set 1)
-	noise_uniform_set = _create_noise_uniform_set()
-	if not noise_uniform_set.is_valid():
-		printerr("VolumetricCloudRenderer: 噪音 uniform set 建立失敗，體積雲不會渲染")
-		can_run = false
-		return
+	# 取樣器建一次重用（我們擁有、生命週期穩定）
+	var sampler_state := RDSamplerState.new()
+	sampler_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
+	sampler_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
+	sampler_state.repeat_w = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
+	sampler_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	sampler_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	sampler_state.mip_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	noise_sampler = rd.sampler_create(sampler_state)
+
+	var clamp_state := RDSamplerState.new()
+	clamp_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	clamp_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	clamp_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	clamp_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	clamp_sampler = rd.sampler_create(clamp_state)
+
+	# 注意：set 1（noise）不在這裡建。它綁的是引擎共享的紋理 view RID，開機時
+	# BPTC 3D 紋理的延遲 VRAM 上傳可能還沒完成，現在建會被引擎隨即作廢。改為
+	# 在首次 _render_process 由 _ensure_uniform_sets() 延遲建立。詳見該函數註解。
 
 	# 參數 uniform buffer (set 2)
 	params_buffer = rd.uniform_buffer_create(PARAMS_BUFFER_SIZE)
@@ -390,55 +438,48 @@ func _add_texture_uniform(uniforms: Array[RDUniform], binding: int, sampler: RID
 	return true
 
 
+# 建立 set 1（noise）。可能被反覆呼叫（失效重建），故 sampler 重用、錯誤節流。
 func _create_noise_uniform_set() -> RID:
 	var uniforms: Array[RDUniform] = []
-
-	# 重複取樣器（3D 噪音用）
-	var sampler_state := RDSamplerState.new()
-	sampler_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
-	sampler_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
-	sampler_state.repeat_w = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
-	sampler_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
-	sampler_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
-	sampler_state.mip_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
-	noise_sampler = rd.sampler_create(sampler_state)
-
-	# 夾邊取樣器（梯度紋理用）
-	var clamp_state := RDSamplerState.new()
-	clamp_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
-	clamp_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
-	clamp_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
-	clamp_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
-	var clamp_sampler := rd.sampler_create(clamp_state)
 
 	# binding 0: 基底噪音 (Perlin-Worley 3D)
 	var base_noise := preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/perlworlnoise.tga")
 	if not _add_texture_uniform(uniforms, 0, noise_sampler, base_noise, "perlworlnoise"):
-		return RID()
+		return _on_noise_set_fail()
 
 	# binding 1: 細節噪音 (Worley 3D)
 	var detail_noise := preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/worlnoise.bmp")
 	if not _add_texture_uniform(uniforms, 1, noise_sampler, detail_noise, "worlnoise"):
-		return RID()
+		return _on_noise_set_fail()
 
 	# binding 2: 天氣圖 (2D，程式化生成)
 	if not _add_texture_uniform(uniforms, 2, noise_sampler, generated_weather_map, "weather_map"):
-		return RID()
+		return _on_noise_set_fail()
 
 	# binding 3: Curl noise (SSC2, 3D 紋理 — 128 切片)
 	var curl_tex := preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/curl_noise_varied.tga")
 	if not _add_texture_uniform(uniforms, 3, noise_sampler, curl_tex, "curl_noise"):
-		return RID()
+		return _on_noise_set_fail()
 
 	# binding 4: 高度梯度 (SSC2, GradientTexture1D)
 	var height_grad := preload("res://addons/sky_3d/assets/resources/height_gradient.tres")
 	if not _add_texture_uniform(uniforms, 4, clamp_sampler, height_grad, "height_gradient"):
-		return RID()
+		return _on_noise_set_fail()
 
 	var result := rd.uniform_set_create(uniforms, shader_rd, 1)
 	if not result.is_valid():
-		printerr("VolumetricCloudRenderer: uniform_set_create(set 1) 失敗")
+		return _on_noise_set_fail()
+	_noise_fail_count = 0  # 成功，重置節流
 	return result
+
+
+# 建立失敗時節流錯誤訊息（延遲建立的前幾幀失敗是預期的，不該洗版）
+func _on_noise_set_fail() -> RID:
+	_noise_fail_count += 1
+	# 開機瞬態允許靜默重試；持續失敗才報（第 60 次 ≈ 1 秒後）
+	if _noise_fail_count == 60:
+		printerr("VolumetricCloudRenderer: noise uniform set 持續建立失敗（已 60 次），體積雲不會渲染")
+	return RID()
 
 
 ## 查詢指定世界位置的雲密度。結果透過 callback 非同步回傳。

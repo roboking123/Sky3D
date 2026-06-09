@@ -1347,6 +1347,13 @@ func _recursive_find_env(node: Node) -> WorldEnvironment:
 		if _vol_effect:
 			_vol_effect.resolution_scale = value
 
+## 時序累積衰減（0=不累積即時呈現, 越高越平滑但快速移動時越拖影）
+@export_range(0.0, 0.95, 0.01) var vol_accumulation_decay: float = 0.7:
+	set(value):
+		vol_accumulation_decay = value
+		if _vol_effect:
+			_vol_effect.accumulation_decay = value
+
 @export_subgroup("Quality")
 
 ## 光線步進次數（越高品質越好，越慢）

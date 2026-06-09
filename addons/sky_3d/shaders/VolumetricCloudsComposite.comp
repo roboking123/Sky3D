@@ -56,11 +56,9 @@ layout(binding = 4, std140) uniform GenericDataBuffer {
 	vec4 _reserved[3];         // 20-31
 } params;
 
-// binding 5-8: 時序累積貼圖（永遠非 MSAA，逐像素）
+// binding 5-6: 時序累積貼圖（乒乓，永遠非 MSAA，逐像素）
 layout(rgba16f, binding = 5) uniform image2D accum_color_a;
 layout(rgba16f, binding = 6) uniform image2D accum_color_b;
-layout(rgba16f, binding = 7) uniform image2D accum_data_a;
-layout(rgba16f, binding = 8) uniform image2D accum_data_b;
 
 // binding 9: 相機矩陣（自建 UBO，理由見 VolumetricCloudEffect._update_camera_data）
 layout(binding = 9, std140) uniform CameraData {
@@ -146,17 +144,11 @@ float linearize_depth(float depth_raw, vec2 ndc_uv) {
 	return length(v.xyz);
 }
 
-// 某視距下的雲遮擋係數（雲在天穹殼，地表幾何擋住前景雲）
-const float CLOUD_DISTANCE = 6001500.0; // SKY_B_RADIUS - GROUND_RADIUS
-float occlusion_fade(float linear_depth, bool is_sky) {
-	if (is_sky || linear_depth >= CLOUD_DISTANCE) {
-		return 1.0;
-	}
-	float fade = smoothstep(0.0, CLOUD_DISTANCE * 0.1, linear_depth);
-	if (linear_depth < CLOUD_DISTANCE * 0.5) {
-		fade = 0.0;
-	}
-	return fade;
+// 雲遮擋：雲在天穹殼（~6000km），地表幾何（數 km）一律在雲前方，所以非天空像素
+// 完全遮擋雲、天空像素顯示雲。二元判定；幾何剪影硬邊由 per-sample MSAA 抗鋸齒。
+// 八面體模型無深度，不需要也無法做距離軟過渡。
+float occlusion_fade(bool is_sky) {
+	return is_sky ? 1.0 : 0.0;
 }
 
 // ============================================================================
@@ -269,8 +261,7 @@ void main() {
 				float sd = FETCH_DEPTH(write_uv, s);
 				float ld = linearize_depth(sd, wuv_ndc);
 				bool ssky = ld >= camera.z_far * 0.99;
-				float fade = occlusion_fade(ssky ? ld * 100.0 : ld, ssky);
-				float a = clamp(cloud_coverage * fade, 0.0, 1.0);
+				float a = clamp(cloud_coverage * occlusion_fade(ssky), 0.0, 1.0);
 
 				vec4 sc = LOAD_SCREEN(write_uv, s);
 				vec3 fc = mix(sc.rgb, blended_cloud, a);

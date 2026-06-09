@@ -59,6 +59,9 @@ var uniform_sets: Array[RID] = []
 var last_blend_from_rd: RID = RID()
 var last_blend_to_rd: RID = RID()
 
+# 時序累積衰減（0=不累積, 越高越平滑但越拖影）
+var accumulation_decay: float = 0.7
+
 # 模糊參數
 var blur_power: float = 2.0
 var blur_quality: float = 1.0
@@ -324,7 +327,8 @@ func _rebuild_resources(buffers: RenderSceneBuffersRD, size: Vector2i, view_coun
 			RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
 		)
 
-		for i in 4:
+		# 每 view 2 張累積貼圖（顏色乒乓 A/B）
+		for i in 2:
 			accumulation_textures.append(rd.texture_create(accum_format, RDTextureView.new()))
 
 		# 建立 uniform set
@@ -372,31 +376,17 @@ func _rebuild_resources(buffers: RenderSceneBuffersRD, size: Vector2i, view_coun
 		var accum_ca := RDUniform.new()
 		accum_ca.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
 		accum_ca.binding = 5
-		accum_ca.add_id(accumulation_textures[view * 4])
+		accum_ca.add_id(accumulation_textures[view * 2])
 		uniforms.push_back(accum_ca)
 
 		# binding 6: 累積顏色 B
 		var accum_cb := RDUniform.new()
 		accum_cb.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
 		accum_cb.binding = 6
-		accum_cb.add_id(accumulation_textures[view * 4 + 1])
+		accum_cb.add_id(accumulation_textures[view * 2 + 1])
 		uniforms.push_back(accum_cb)
 
-		# binding 7: 累積資料 A
-		var accum_da := RDUniform.new()
-		accum_da.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-		accum_da.binding = 7
-		accum_da.add_id(accumulation_textures[view * 4 + 2])
-		uniforms.push_back(accum_da)
-
-		# binding 8: 累積資料 B
-		var accum_db := RDUniform.new()
-		accum_db.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-		accum_db.binding = 8
-		accum_db.add_id(accumulation_textures[view * 4 + 3])
-		uniforms.push_back(accum_db)
-
-		# binding 9: 相機矩陣（自建 UBO）
+		# binding 9: 相機矩陣（自建 UBO；binding 7/8 已移除，gap 合法）
 		var cam_uniform := RDUniform.new()
 		cam_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
 		cam_uniform.binding = 9
@@ -444,8 +434,8 @@ func _update_general_data(size: Vector2i, _scene_data: RenderSceneData) -> void:
 	# float blur_quality (14)
 	general_data.encode_float(idx, blur_quality); idx += 4
 
-	# float accumulation_decay (15) — 時序累積衰減
-	general_data.encode_float(idx, 0.7); idx += 4
+	# float accumulation_decay (15) — 時序累積衰減（越高越平滑但越拖影）
+	general_data.encode_float(idx, accumulation_decay); idx += 4
 
 	# vec3 atmosphere_color (16-18)
 	general_data.encode_float(idx, atmosphere_color.r); idx += 4

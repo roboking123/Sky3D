@@ -107,14 +107,15 @@ func _build_scene() -> void:
 	volumetric_mesh.visible = false
 	add_child(volumetric_mesh)
 	fog_material.set_shader_parameter("sun_direction", _sun_transform.origin)
-	# 初始化 compute shader 渲染器
-	_vol_renderer = VolumetricCloudRenderer.new()
-	_vol_renderer.initialize(vol_texture_size, vol_frames_to_update)
-
-	# 初始化 CompositorEffect 合成器
-	_vol_effect = VolumetricCloudEffect.new()
-	_register_compositor_effect()
-	_update_volumetric_routing()
+	# 八面體體積雲（已停用，改用 SSC2 真體積雲）。只在 volumetric_visible 時才建，
+	# 避免白白建立 compute 資源、避免 CompositorEffect 跟 SSC2 衝突。
+	if volumetric_visible:
+		_vol_renderer = VolumetricCloudRenderer.new()
+		_vol_renderer.initialize(vol_texture_size, vol_frames_to_update)
+		_vol_effect = VolumetricCloudEffect.new()
+		if vol_use_compositor:
+			_register_compositor_effect()
+		_update_volumetric_routing()
 	
 	# Trigger all inline setters for exported variables
 	var script: GDScript = get_script()

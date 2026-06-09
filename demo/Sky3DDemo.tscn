@@ -12,6 +12,8 @@
 [ext_resource type="Texture2D" uid="uid://djpfuyxkryegn" path="res://addons/sky_3d/assets/textures/noise.jpg" id="7_d0ed4"]
 [ext_resource type="Texture2D" uid="uid://bm7dot7t7u1q4" path="res://addons/sky_3d/assets/thirdparty/textures/milkyway/StarField.jpg" id="8_humls"]
 [ext_resource type="Script" uid="uid://bsu1dmpbm31ag" path="res://addons/sky_3d/src/VolumetricCloudEffect.gd" id="9_0j4pb"]
+[ext_resource type="Script" uid="uid://dnblgqynq1t7l" path="res://addons/SunshineClouds2/SunshineClouds.gd" id="10_ssc2c"]
+[ext_resource type="Script" uid="uid://djusduuxf0voj" path="res://addons/SunshineClouds2/SunshineCloudsDriver.gd" id="11_ssc2d"]
 
 [sub_resource type="GDScript" id="GDScript_v8wrf"]
 script/source = "extends Node3D
@@ -212,7 +214,7 @@ access_resolved_color = true
 access_resolved_depth = true
 needs_motion_vectors = true
 needs_normal_roughness = false
-script = ExtResource("9_0j4pb")
+script = ExtResource("10_ssc2c")
 
 [sub_resource type="Compositor" id="Compositor_d0ed4"]
 compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_1g8sw")])
@@ -272,7 +274,7 @@ wind_speed = 0.0
 wind_direction = 1.5708
 cirrus_visible = false
 cumulus_visible = false
-volumetric_visible = true
+volumetric_visible = false
 
 [node name="TimeOfDay" type="Node" parent="Sky3D" unique_id=514872795]
 script = ExtResource("3")
@@ -280,3 +282,10 @@ editor_time_enabled = false
 game_time_enabled = false
 dome_path = NodePath("../SkyDome")
 current_time = 10.613
+
+[node name="SunshineCloudsDriver" type="Node" parent="." node_paths=PackedStringArray("tracked_directional_lights")]
+script = ExtResource("11_ssc2d")
+update_continuously = true
+clouds_resource = SubResource("CompositorEffect_1g8sw")
+tracked_directional_lights = [NodePath("../Sky3D/SunLight"), NodePath("../Sky3D/MoonLight")]
+tracked_directional_light_shadow_steps = Array[int]([12, 6])

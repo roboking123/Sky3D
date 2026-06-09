@@ -16,7 +16,7 @@ layout(rgba16f, set = 0, binding = 0) uniform restrict writeonly image2D current
 layout(set = 1, binding = 0) uniform sampler3D large_scale_noise;    // Perlin-Worley (clayjohn)
 layout(set = 1, binding = 1) uniform sampler3D small_scale_noise;    // Worley detail (clayjohn)
 layout(set = 1, binding = 2) uniform sampler2D weather_noise;        // 天氣圖 (程式化生成)
-layout(set = 1, binding = 3) uniform sampler3D curl_noise;           // Curl noise (SSC2)
+layout(set = 1, binding = 3) uniform sampler3D curl_noise;           // Curl noise (SSC2, 3D 紋理)
 layout(set = 1, binding = 4) uniform sampler2D height_gradient;      // 高度梯度紋理 (SSC2)
 
 // === set 2: 參數（uniform buffer 取代 push constant，突破 128 bytes 限制） ===
@@ -198,7 +198,7 @@ float sample_density(vec3 pip, vec3 weather, float mip, bool is_ambient) {
 
 	// Curl noise 位置偏移（SSC2）：雲邊緣捲曲變形
 	if (!is_ambient && param_curl_strength > 0.0 && mip < 1.0) {
-		float curl_height = grad_sample.a; // 紋理梯度 A 通道控制 curl 強度
+		float curl_height = grad_sample.a;
 		if (curl_height > 0.0) {
 			vec3 curl = textureLod(curl_noise, p * param_curl_noise_scale, 0.0).xyz * 2.0 - 1.0;
 			curl *= vec3(1.0, 0.2, 1.0); // 垂直方向抑制

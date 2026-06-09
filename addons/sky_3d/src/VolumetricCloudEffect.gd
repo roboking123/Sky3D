@@ -146,10 +146,15 @@ func _initialize_compute() -> void:
 		return
 
 	var spirv := shader_file.get_spirv()
+	var compile_err: String = spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+	if compile_err != "":
+		enabled = false
+		printerr("VolumetricCloudEffect: Composite shader 編譯失敗:\n", compile_err)
+		return
 	composite_shader = rd.shader_create_from_spirv(spirv)
 	if not composite_shader.is_valid():
 		enabled = false
-		printerr("VolumetricCloudEffect: shader 編譯失敗")
+		printerr("VolumetricCloudEffect: shader_create_from_spirv 失敗")
 		return
 
 	composite_pipeline = rd.compute_pipeline_create(composite_shader)

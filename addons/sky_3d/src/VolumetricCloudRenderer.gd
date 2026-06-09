@@ -188,6 +188,8 @@ func render_full() -> void:
 func _render_process(p_texture_to_update: int) -> void:
 	if not can_run:
 		return
+	if not noise_uniform_set.is_valid() or not params_uniform_set.is_valid() or not lights_uniform_set.is_valid():
+		return
 	textures[p_texture_to_update].texture_rd_rid = texture_rd[p_texture_to_update]
 
 	# 組裝 uniform buffer 資料（std140 對齊）
@@ -286,14 +288,24 @@ func _initialize_compute(p_texture_size: int) -> void:
 		can_run = false
 		return
 	var shader_spirv: RDShaderSPIRV = shader_file.get_spirv()
+	var compile_err: String = shader_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+	if compile_err != "":
+		printerr("VolumetricCloudRenderer: Compute shader 編譯失敗:\n", compile_err)
+		can_run = false
+		return
 	shader_rd = rd.shader_create_from_spirv(shader_spirv)
 	if not shader_rd.is_valid():
+		printerr("VolumetricCloudRenderer: shader_create_from_spirv 失敗")
 		can_run = false
 		return
 	pipeline = rd.compute_pipeline_create(shader_rd)
 
 	# 噪音 uniform set (set 1)
 	noise_uniform_set = _create_noise_uniform_set()
+	if not noise_uniform_set.is_valid():
+		printerr("VolumetricCloudRenderer: 噪音 uniform set 建立失敗，體積雲不會渲染")
+		can_run = false
+		return
 
 	# 參數 uniform buffer (set 2)
 	params_buffer = rd.uniform_buffer_create(PARAMS_BUFFER_SIZE)
@@ -352,9 +364,25 @@ func _create_texture_uniform_set(p_texture_rd: RID) -> RID:
 	return rd.uniform_set_create([uniform], shader_rd, 0)
 
 
+func _add_texture_uniform(uniforms: Array[RDUniform], binding: int, sampler: RID,
+		texture: Texture, label: String) -> bool:
+	var tex_rd := RenderingServer.texture_get_rd_texture(texture.get_rid())
+	if not tex_rd.is_valid():
+		printerr("VolumetricCloudRenderer: 紋理 RD RID 無效 — ", label)
+		return false
+	var u := RDUniform.new()
+	u.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u.binding = binding
+	u.add_id(sampler)
+	u.add_id(tex_rd)
+	uniforms.push_back(u)
+	return true
+
+
 func _create_noise_uniform_set() -> RID:
 	var uniforms: Array[RDUniform] = []
 
+	# 重複取樣器（3D 噪音用）
 	var sampler_state := RDSamplerState.new()
 	sampler_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
 	sampler_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
@@ -364,62 +392,42 @@ func _create_noise_uniform_set() -> RID:
 	sampler_state.mip_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
 	noise_sampler = rd.sampler_create(sampler_state)
 
-	# binding 0: 基底噪音 (Perlin-Worley)
+	# 夾邊取樣器（梯度紋理用）
+	var clamp_state := RDSamplerState.new()
+	clamp_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	clamp_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	clamp_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	clamp_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	var clamp_sampler := rd.sampler_create(clamp_state)
+
+	# binding 0: 基底噪音 (Perlin-Worley 3D)
 	var base_noise := preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/perlworlnoise.tga")
-	var base_rd := RenderingServer.texture_get_rd_texture(base_noise.get_rid())
-	var u0 := RDUniform.new()
-	u0.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
-	u0.binding = 0
-	u0.add_id(noise_sampler)
-	u0.add_id(base_rd)
-	uniforms.push_back(u0)
+	if not _add_texture_uniform(uniforms, 0, noise_sampler, base_noise, "perlworlnoise"):
+		return RID()
 
-	# binding 1: 細節噪音 (Worley)
+	# binding 1: 細節噪音 (Worley 3D)
 	var detail_noise := preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/worlnoise.bmp")
-	var detail_rd := RenderingServer.texture_get_rd_texture(detail_noise.get_rid())
-	var u1 := RDUniform.new()
-	u1.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
-	u1.binding = 1
-	u1.add_id(noise_sampler)
-	u1.add_id(detail_rd)
-	uniforms.push_back(u1)
+	if not _add_texture_uniform(uniforms, 1, noise_sampler, detail_noise, "worlnoise"):
+		return RID()
 
-	# binding 2: 天氣圖
-	var weather_rd := RenderingServer.texture_get_rd_texture(generated_weather_map.get_rid())
-	var u2 := RDUniform.new()
-	u2.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
-	u2.binding = 2
-	u2.add_id(noise_sampler)
-	u2.add_id(weather_rd)
-	uniforms.push_back(u2)
+	# binding 2: 天氣圖 (2D，程式化生成)
+	if not _add_texture_uniform(uniforms, 2, noise_sampler, generated_weather_map, "weather_map"):
+		return RID()
 
-	# binding 3: Curl noise (SSC2)
+	# binding 3: Curl noise (SSC2, 3D 紋理 — 128 切片)
 	var curl_tex := preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/curl_noise_varied.tga")
-	var curl_rd := RenderingServer.texture_get_rd_texture(curl_tex.get_rid())
-	var u3 := RDUniform.new()
-	u3.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
-	u3.binding = 3
-	u3.add_id(noise_sampler)
-	u3.add_id(curl_rd)
-	uniforms.push_back(u3)
+	if not _add_texture_uniform(uniforms, 3, noise_sampler, curl_tex, "curl_noise"):
+		return RID()
 
-	# binding 4: 高度梯度 (SSC2)
+	# binding 4: 高度梯度 (SSC2, GradientTexture1D)
 	var height_grad := preload("res://addons/sky_3d/assets/resources/height_gradient.tres")
-	var grad_rd := RenderingServer.texture_get_rd_texture(height_grad.get_rid())
-	var linear_sampler_state := RDSamplerState.new()
-	linear_sampler_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
-	linear_sampler_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
-	linear_sampler_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
-	linear_sampler_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
-	var linear_sampler := rd.sampler_create(linear_sampler_state)
-	var u4 := RDUniform.new()
-	u4.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
-	u4.binding = 4
-	u4.add_id(linear_sampler)
-	u4.add_id(grad_rd)
-	uniforms.push_back(u4)
+	if not _add_texture_uniform(uniforms, 4, clamp_sampler, height_grad, "height_gradient"):
+		return RID()
 
-	return rd.uniform_set_create(uniforms, shader_rd, 1)
+	var result := rd.uniform_set_create(uniforms, shader_rd, 1)
+	if not result.is_valid():
+		printerr("VolumetricCloudRenderer: uniform_set_create(set 1) 失敗")
+	return result
 
 
 ## 查詢指定世界位置的雲密度。結果透過 callback 非同步回傳。

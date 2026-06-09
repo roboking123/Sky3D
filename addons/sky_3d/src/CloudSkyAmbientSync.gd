@@ -33,6 +33,10 @@ var _已快取原始色: bool = false
 
 
 func _process(_delta: float) -> void:
+	# 只在實際執行時連動。編輯器裡不動手，把 cloud_ambient_color 的控制權
+	# 完整還給 Inspector，避免 @tool 偷改使用者正在調的值又被存檔
+	if Engine.is_editor_hint():
+		return
 	if sky_environment == null or sky_environment.environment == null:
 		return
 	if clouds_driver == null or clouds_driver.clouds_resource == null:

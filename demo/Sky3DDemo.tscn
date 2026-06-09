@@ -23,7 +23,7 @@
 [ext_resource type="RDShaderFile" uid="uid://cqhejbalsrvjp" path="res://addons/SunshineClouds2/SunshineCloudsPostCompute.glsl" id="16_3vwit"]
 [ext_resource type="RDShaderFile" uid="uid://crfpk8ta4qxsk" path="res://addons/SunshineClouds2/SunshineCloudsPreCompute.glsl" id="17_txdyn"]
 [ext_resource type="NoiseTexture3D" uid="uid://bnck2kxeg5bkg" path="res://addons/SunshineClouds2/NoiseTextures/SmallScaleNoise.tres" id="19_2dr7f"]
-[ext_resource type="Script" path="res://addons/sky_3d/src/CloudSkyAmbientSync.gd" id="20_clsky"]
+[ext_resource type="Script" uid="uid://dmghenpaoxbyq" path="res://addons/sky_3d/src/CloudSkyAmbientSync.gd" id="20_clsky"]
 
 [sub_resource type="GDScript" id="GDScript_v8wrf"]
 script/source = "extends Node3D
@@ -227,7 +227,7 @@ tonemap_white = 6.0
 
 [sub_resource type="CameraAttributesPractical" id="CameraAttributesPractical_d0ed4"]
 
-[sub_resource type="CompositorEffect" id="CompositorEffect_1g8sw"]
+[sub_resource type="CompositorEffect" id="CompositorEffect_wr1o1"]
 resource_local_to_scene = false
 resource_name = ""
 enabled = true
@@ -237,6 +237,17 @@ access_resolved_depth = true
 needs_motion_vectors = true
 needs_normal_roughness = false
 script = ExtResource("10_ssc2c")
+clouds_coverage = 0.862
+atmospheric_density = 0.4
+cloud_ambient_color = Color(0.761, 0.784, 0.824, 1)
+cloud_ambient_tint = Color(0.58, 0.6, 0.62, 1)
+ambient_occlusion_color = Color(0.45, 0.47, 0.52, 1)
+accumulation_decay = 0.9
+extra_large_noise_scale = 100000.0
+large_noise_scale = 60000.0
+cloud_ceiling = 16000.0
+resolution_scale = 1
+max_lighting_steps = 16.0
 dither_noise = ExtResource("11_1skyl")
 height_gradient = ExtResource("13_5nt6w")
 extra_large_noise_patterns = ExtResource("12_ewjum")
@@ -247,20 +258,11 @@ curl_noise = ExtResource("10_wr1o1")
 pre_pass_compute_shader = ExtResource("17_txdyn")
 compute_shader = ExtResource("9_2tg77")
 post_pass_compute_shader = ExtResource("16_3vwit")
-atmospheric_density = 0.4
-cloud_ambient_color = Color(0.761, 0.784, 0.824, 1)
-cloud_ambient_tint = Color(0.58, 0.6, 0.62, 1)
-ambient_occlusion_color = Color(0.45, 0.47, 0.52, 1)
-accumulation_decay = 0.85
-extra_large_noise_scale = 100000.0
-large_noise_scale = 60000.0
-cloud_ceiling = 16000.0
-resolution_scale = 0
 wind_direction = Vector3(1, 0, 1)
 directional_lights_data = Array[Vector4]([Vector4(0.29551914, 0.7307851, 0.61532235, 12), Vector4(1, 1, 1, 1), Vector4(0.9928705, -0.11430087, -0.033815037, 6), Vector4(0.572549, 0.776471, 0.956863, 0)])
 
 [sub_resource type="Compositor" id="Compositor_d0ed4"]
-compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_1g8sw")])
+compositor_effects = Array[CompositorEffect]([SubResource("CompositorEffect_wr1o1")])
 
 [node name="Main" type="Node3D" unique_id=1085262622]
 
@@ -328,7 +330,7 @@ current_time = 10.613
 [node name="SunshineCloudsDriver" type="Node" parent="." unique_id=224310791 node_paths=PackedStringArray("tracked_directional_lights")]
 script = ExtResource("11_ssc2d")
 update_continuously = true
-clouds_resource = SubResource("CompositorEffect_1g8sw")
+clouds_resource = SubResource("CompositorEffect_wr1o1")
 tracked_directional_lights = [NodePath("../Sky3D/SunLight"), NodePath("../Sky3D/MoonLight")]
 tracked_directional_light_shadow_steps = Array[int]([12, 6])
 

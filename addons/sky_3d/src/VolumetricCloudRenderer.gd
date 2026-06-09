@@ -1,12 +1,13 @@
 # Copyright (c) 2023-2025 Cory Petkovsek and Contributors
 # Compute shader 體積雲渲染器
-# 參考 clayjohn/godot-volumetric-cloud-demo-v2 (MIT)
+# 基底：clayjohn/godot-volumetric-cloud-demo-v2 (MIT)
+# curl noise / 風切 / AO / 自適應步長：Bonkahe/SunshineClouds2 (MIT)
 
 @tool
 class_name VolumetricCloudRenderer
 extends RefCounted
 
-const COMPUTE_SHADER_PATH = "res://addons/sky_3d/shaders/VolumetricCloudsCompute.glsl"
+const COMPUTE_SHADER_PATH := "res://addons/sky_3d/shaders/VolumetricCloudsCompute.glsl"
 
 var rd: RenderingDevice
 var shader_rd: RID
@@ -19,6 +20,10 @@ var textures: Array[Texture2DRD] = []
 
 var noise_uniform_set: RID = RID()
 var noise_sampler: RID
+
+# uniform buffer（取代 push constant）
+var params_buffer: RID = RID()
+var params_uniform_set: RID = RID()
 
 var texture_to_update: int = 0
 var texture_to_blend_from: int = 1
@@ -34,7 +39,7 @@ var frame: int = 0
 var can_run: bool = false
 var needs_full_init: bool = true
 
-# 每幀快取的資料
+# === 基本參數 ===
 var cloud_pos: Vector2 = Vector2.ZERO
 var detail_pos: Vector2 = Vector2.ZERO
 var weather_pos: Vector2 = Vector2.ZERO
@@ -51,6 +56,27 @@ var cloud_night_color: Color = Color(0.06, 0.08, 0.14)
 var use_weather: bool = true
 var current_time: float = 0.0
 var generated_weather_map: ImageTexture
+
+# === 新增參數（SSC2 零件） ===
+var curl_strength: float = 4500.0
+var wind_shear_power: float = 0.0
+var wind_direction: Vector2 = Vector2(1.0, 0.0)
+var wind_shear_range: float = 0.54
+var ao_strength: float = 0.3
+
+# 噪音尺度
+var base_noise_scale: float = 0.00008
+var detail_noise_scale: float = 0.001
+var weather_scale: float = 0.0002
+var curl_noise_scale: float = 0.00005
+
+# 品質
+var march_steps: float = 128.0
+var shadow_steps: float = 6.0
+
+# Uniform buffer 大小（對齊到 std140）
+# 14 個 vec4 = 224 bytes，對齊到 256
+const PARAMS_BUFFER_SIZE := 256
 
 
 func initialize(p_texture_size: int = 768, p_frames: int = 64) -> void:
@@ -87,6 +113,9 @@ func cleanup() -> void:
 		if noise_sampler.is_valid():
 			rd.free_rid(noise_sampler)
 			noise_sampler = RID()
+		if params_buffer.is_valid():
+			rd.free_rid(params_buffer)
+			params_buffer = RID()
 
 
 func get_blend_from_texture() -> Texture2DRD:
@@ -145,61 +174,84 @@ func _render_process(p_texture_to_update: int) -> void:
 		return
 	textures[p_texture_to_update].texture_rd_rid = texture_rd[p_texture_to_update]
 
-	var push_constant := PackedFloat32Array()
+	# 組裝 uniform buffer 資料（std140 對齊）
+	var data := PackedByteArray()
+	data.resize(PARAMS_BUFFER_SIZE)
+	var idx: int = 0
 
-	# texture_size, update_position (vec2, vec2)
-	push_constant.push_back(texture_size)
-	push_constant.push_back(texture_size)
-	push_constant.push_back(update_position.x)
-	push_constant.push_back(update_position.y)
+	# vec2 texture_size + vec2 update_position → vec4
+	data.encode_float(idx, texture_size); idx += 4
+	data.encode_float(idx, texture_size); idx += 4
+	data.encode_float(idx, update_position.x); idx += 4
+	data.encode_float(idx, update_position.y); idx += 4
 
-	# cloud_pos, detailed_pos (vec2, vec2)
-	push_constant.push_back(cloud_pos.x)
-	push_constant.push_back(cloud_pos.y)
-	push_constant.push_back(detail_pos.x)
-	push_constant.push_back(detail_pos.y)
+	# vec2 cloud_pos + vec2 detail_pos → vec4
+	data.encode_float(idx, cloud_pos.x); idx += 4
+	data.encode_float(idx, cloud_pos.y); idx += 4
+	data.encode_float(idx, detail_pos.x); idx += 4
+	data.encode_float(idx, detail_pos.y); idx += 4
 
-	# weather_pos, coverage, cloud_type (vec2, float, float)
-	push_constant.push_back(weather_pos.x)
-	push_constant.push_back(weather_pos.y)
-	push_constant.push_back(coverage)
-	push_constant.push_back(cloud_type)
+	# vec2 weather_pos + coverage + cloud_type → vec4
+	data.encode_float(idx, weather_pos.x); idx += 4
+	data.encode_float(idx, weather_pos.y); idx += 4
+	data.encode_float(idx, coverage); idx += 4
+	data.encode_float(idx, cloud_type); idx += 4
 
-	# sun_direction, density (vec3, float)
-	push_constant.push_back(sun_direction.x)
-	push_constant.push_back(sun_direction.y)
-	push_constant.push_back(sun_direction.z)
-	push_constant.push_back(density)
+	# vec3 sun_direction + detail_strength → vec4
+	data.encode_float(idx, sun_direction.x); idx += 4
+	data.encode_float(idx, sun_direction.y); idx += 4
+	data.encode_float(idx, sun_direction.z); idx += 4
+	data.encode_float(idx, detail_strength); idx += 4
 
-	# moon_direction, absorption (vec3, float)
-	push_constant.push_back(moon_direction.x)
-	push_constant.push_back(moon_direction.y)
-	push_constant.push_back(moon_direction.z)
-	push_constant.push_back(absorption)
+	# vec3 moon_direction + time → vec4
+	data.encode_float(idx, moon_direction.x); idx += 4
+	data.encode_float(idx, moon_direction.y); idx += 4
+	data.encode_float(idx, moon_direction.z); idx += 4
+	data.encode_float(idx, current_time); idx += 4
 
-	# cloud_day_color, detail_strength (vec3, float)
-	push_constant.push_back(cloud_day_color.r)
-	push_constant.push_back(cloud_day_color.g)
-	push_constant.push_back(cloud_day_color.b)
-	push_constant.push_back(detail_strength)
+	# vec3 cloud_day_color + use_weather → vec4
+	data.encode_float(idx, cloud_day_color.r); idx += 4
+	data.encode_float(idx, cloud_day_color.g); idx += 4
+	data.encode_float(idx, cloud_day_color.b); idx += 4
+	data.encode_float(idx, 1.0 if use_weather else 0.0); idx += 4
 
-	# cloud_horizon_color, time (vec3, float)
-	push_constant.push_back(cloud_horizon_color.r)
-	push_constant.push_back(cloud_horizon_color.g)
-	push_constant.push_back(cloud_horizon_color.b)
-	push_constant.push_back(current_time)
+	# vec3 cloud_horizon_color + curl_strength → vec4
+	data.encode_float(idx, cloud_horizon_color.r); idx += 4
+	data.encode_float(idx, cloud_horizon_color.g); idx += 4
+	data.encode_float(idx, cloud_horizon_color.b); idx += 4
+	data.encode_float(idx, curl_strength); idx += 4
 
-	# cloud_night_color, use_weather (vec3, float)
-	push_constant.push_back(cloud_night_color.r)
-	push_constant.push_back(cloud_night_color.g)
-	push_constant.push_back(cloud_night_color.b)
-	push_constant.push_back(1.0 if use_weather else 0.0)
+	# vec3 cloud_night_color + wind_shear_power → vec4
+	data.encode_float(idx, cloud_night_color.r); idx += 4
+	data.encode_float(idx, cloud_night_color.g); idx += 4
+	data.encode_float(idx, cloud_night_color.b); idx += 4
+	data.encode_float(idx, wind_shear_power); idx += 4
+
+	# vec2 wind_direction + wind_shear_range + ao_strength → vec4
+	data.encode_float(idx, wind_direction.x); idx += 4
+	data.encode_float(idx, wind_direction.y); idx += 4
+	data.encode_float(idx, wind_shear_range); idx += 4
+	data.encode_float(idx, ao_strength); idx += 4
+
+	# 4 floats: noise scales → vec4
+	data.encode_float(idx, base_noise_scale); idx += 4
+	data.encode_float(idx, detail_noise_scale); idx += 4
+	data.encode_float(idx, weather_scale); idx += 4
+	data.encode_float(idx, curl_noise_scale); idx += 4
+
+	# 4 floats: quality → vec4
+	data.encode_float(idx, march_steps); idx += 4
+	data.encode_float(idx, shadow_steps); idx += 4
+	data.encode_float(idx, density); idx += 4
+	data.encode_float(idx, absorption); idx += 4
+
+	rd.buffer_update(params_buffer, 0, PARAMS_BUFFER_SIZE, data)
 
 	var compute_list := rd.compute_list_begin()
 	rd.compute_list_bind_compute_pipeline(compute_list, pipeline)
-	rd.compute_list_bind_uniform_set(compute_list, noise_uniform_set, 1)
 	rd.compute_list_bind_uniform_set(compute_list, texture_set[p_texture_to_update], 0)
-	rd.compute_list_set_push_constant(compute_list, push_constant.to_byte_array(), push_constant.size() * 4)
+	rd.compute_list_bind_uniform_set(compute_list, noise_uniform_set, 1)
+	rd.compute_list_bind_uniform_set(compute_list, params_uniform_set, 2)
 	rd.compute_list_dispatch(compute_list, num_workgroups, num_workgroups, 1)
 	rd.compute_list_end()
 
@@ -210,8 +262,8 @@ func _initialize_compute(p_texture_size: int) -> void:
 		can_run = false
 		return
 
-	# 建立 shader
-	var shader_file = load(COMPUTE_SHADER_PATH)
+	# shader
+	var shader_file := load(COMPUTE_SHADER_PATH)
 	if not shader_file:
 		can_run = false
 		return
@@ -222,10 +274,18 @@ func _initialize_compute(p_texture_size: int) -> void:
 		return
 	pipeline = rd.compute_pipeline_create(shader_rd)
 
-	# 建立噪音 uniform set
+	# 噪音 uniform set (set 1)
 	noise_uniform_set = _create_noise_uniform_set()
 
-	# 建立三重緩衝貼圖
+	# 參數 uniform buffer (set 2)
+	params_buffer = rd.uniform_buffer_create(PARAMS_BUFFER_SIZE)
+	var params_uniform := RDUniform.new()
+	params_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+	params_uniform.binding = 0
+	params_uniform.add_id(params_buffer)
+	params_uniform_set = rd.uniform_set_create([params_uniform], shader_rd, 2)
+
+	# 三重緩衝貼圖 (set 0)
 	var tf := RDTextureFormat.new()
 	tf.format = RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
 	tf.texture_type = RenderingDevice.TEXTURE_TYPE_2D
@@ -277,9 +337,9 @@ func _create_noise_uniform_set() -> RID:
 	sampler_state.mip_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
 	noise_sampler = rd.sampler_create(sampler_state)
 
-	# 基底噪音
-	var base_noise = preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/perlworlnoise.tga")
-	var base_rd = RenderingServer.texture_get_rd_texture(base_noise.get_rid())
+	# binding 0: 基底噪音 (Perlin-Worley)
+	var base_noise := preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/perlworlnoise.tga")
+	var base_rd := RenderingServer.texture_get_rd_texture(base_noise.get_rid())
 	var u0 := RDUniform.new()
 	u0.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 	u0.binding = 0
@@ -287,9 +347,9 @@ func _create_noise_uniform_set() -> RID:
 	u0.add_id(base_rd)
 	uniforms.push_back(u0)
 
-	# 細節噪音
-	var detail_noise = preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/worlnoise.bmp")
-	var detail_rd = RenderingServer.texture_get_rd_texture(detail_noise.get_rid())
+	# binding 1: 細節噪音 (Worley)
+	var detail_noise := preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/worlnoise.bmp")
+	var detail_rd := RenderingServer.texture_get_rd_texture(detail_noise.get_rid())
 	var u1 := RDUniform.new()
 	u1.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 	u1.binding = 1
@@ -297,8 +357,8 @@ func _create_noise_uniform_set() -> RID:
 	u1.add_id(detail_rd)
 	uniforms.push_back(u1)
 
-	# 天氣圖（自動生成）
-	var weather_rd = RenderingServer.texture_get_rd_texture(generated_weather_map.get_rid())
+	# binding 2: 天氣圖
+	var weather_rd := RenderingServer.texture_get_rd_texture(generated_weather_map.get_rid())
 	var u2 := RDUniform.new()
 	u2.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 	u2.binding = 2
@@ -306,20 +366,46 @@ func _create_noise_uniform_set() -> RID:
 	u2.add_id(weather_rd)
 	uniforms.push_back(u2)
 
+	# binding 3: Curl noise (SSC2)
+	var curl_tex := preload("res://addons/sky_3d/assets/thirdparty/textures/clouds/curl_noise_varied.tga")
+	var curl_rd := RenderingServer.texture_get_rd_texture(curl_tex.get_rid())
+	var u3 := RDUniform.new()
+	u3.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u3.binding = 3
+	u3.add_id(noise_sampler)
+	u3.add_id(curl_rd)
+	uniforms.push_back(u3)
+
+	# binding 4: 高度梯度 (SSC2)
+	var height_grad := preload("res://addons/sky_3d/assets/resources/height_gradient.tres")
+	var grad_rd := RenderingServer.texture_get_rd_texture(height_grad.get_rid())
+	var linear_sampler_state := RDSamplerState.new()
+	linear_sampler_state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	linear_sampler_state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE
+	linear_sampler_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	linear_sampler_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	var linear_sampler := rd.sampler_create(linear_sampler_state)
+	var u4 := RDUniform.new()
+	u4.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u4.binding = 4
+	u4.add_id(linear_sampler)
+	u4.add_id(grad_rd)
+	uniforms.push_back(u4)
+
 	return rd.uniform_set_create(uniforms, shader_rd, 1)
 
 
 func _generate_weather_map() -> void:
 	const MAP_SIZE := 512
 
-	# R：雲型 — 低頻，大片區域同一種雲
+	# R：雲型 — cellular 噪音給每個區塊一個隨機值
 	var type_noise := FastNoiseLite.new()
 	type_noise.noise_type = FastNoiseLite.TYPE_CELLULAR
 	type_noise.frequency = 0.004
 	type_noise.seed = 42
 	type_noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
 
-	# B：覆蓋率 — 用 cellular 噪音產生明確的雲團/晴天分界
+	# B：覆蓋率
 	var cov_noise := FastNoiseLite.new()
 	cov_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	cov_noise.frequency = 0.005
@@ -327,7 +413,7 @@ func _generate_weather_map() -> void:
 	cov_noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 	cov_noise.fractal_octaves = 4
 
-	# 大尺度遮罩：決定哪裡是大片晴天
+	# 大尺度遮罩
 	var mask_noise := FastNoiseLite.new()
 	mask_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	mask_noise.frequency = 0.0015
@@ -346,22 +432,18 @@ func _generate_weather_map() -> void:
 			var fx := float(x)
 			var fy := float(y)
 
-			# R：雲型 — cellular noise 給每個區塊一個隨機值
-			# 量化到四段讓四種雲型都有機會出現
+			# R：雲型 — 量化到四段
 			var type_raw := type_noise.get_noise_2d(fx, fy) * 0.5 + 0.5
 			var type_quantized := floorf(type_raw * 4.0) / 4.0
-			# 保留區塊內的微小變化（不要完全硬切）
 			var type_frac := fmod(type_raw * 4.0, 1.0) * 0.2
 			var type_val := clampf(type_quantized + type_frac, 0.0, 1.0)
 
-			# B：覆蓋率 — 兩層混合後做強力 smoothstep
+			# B：覆蓋率 — 雙層混合 + 雙重 smoothstep
 			var cov_detail := cov_noise.get_noise_2d(fx, fy) * 0.5 + 0.5
 			var mask := mask_noise.get_noise_2d(fx, fy) * 0.5 + 0.5
 			var cov_raw := mask * 0.6 + cov_detail * 0.4
-			# 強力對比：0.3 以下全切、0.6 以上全開
 			var t := clampf((cov_raw - 0.3) / 0.3, 0.0, 1.0)
 			var cov_val := t * t * (3.0 - 2.0 * t)
-			# 再做一次讓邊界更銳利
 			t = clampf(cov_val, 0.0, 1.0)
 			cov_val = t * t * (3.0 - 2.0 * t)
 

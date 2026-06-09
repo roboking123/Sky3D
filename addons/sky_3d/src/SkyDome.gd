@@ -30,6 +30,7 @@ var fog_material: Material
 var volumetric_mesh: MeshInstance3D
 var volumetric_material: ShaderMaterial
 var _vol_renderer: VolumetricCloudRenderer
+var _vol_effect: VolumetricCloudEffect
 
 
 #####################
@@ -75,7 +76,7 @@ func _build_scene() -> void:
 	
 	fog_mesh = MeshInstance3D.new()
 	fog_mesh.name = "_FogMeshI"
-	var fog_screen_quad = QuadMesh.new()
+	var fog_screen_quad := QuadMesh.new()
 	var size: Vector2
 	size.x = 2.0
 	size.y = 2.0
@@ -94,7 +95,7 @@ func _build_scene() -> void:
 	# Volumetric Clouds (compute shader 路徑)
 	volumetric_mesh = MeshInstance3D.new()
 	volumetric_mesh.name = "_VolumetricCloudsI"
-	var vol_quad = QuadMesh.new()
+	var vol_quad := QuadMesh.new()
 	vol_quad.size = Vector2(2.0, 2.0)
 	volumetric_mesh.mesh = vol_quad
 	volumetric_material = ShaderMaterial.new()
@@ -109,6 +110,11 @@ func _build_scene() -> void:
 	# 初始化 compute shader 渲染器
 	_vol_renderer = VolumetricCloudRenderer.new()
 	_vol_renderer.initialize(vol_texture_size, vol_frames_to_update)
+
+	# 初始化 CompositorEffect 合成器
+	_vol_effect = VolumetricCloudEffect.new()
+	_vol_effect.clouds_enabled = volumetric_visible
+	_register_compositor_effect()
 	
 	# Trigger all inline setters for exported variables
 	var script: GDScript = get_script()
@@ -151,10 +157,17 @@ func process_tick(delta: float) -> void:
 		_vol_renderer.detail_pos += delta * wind_norm
 		_vol_renderer.weather_pos += delta * 0.001 * wind_norm * _cloud_speed
 		_vol_renderer.current_time = Time.get_ticks_msec() / 1000.0
+		_vol_renderer.wind_direction = wind_norm
 		_vol_renderer.render_frame()
+		# 舊路徑：QuadMesh 顯示（保留向後相容）
 		volumetric_material.set_shader_parameter("blend_from_texture", _vol_renderer.get_blend_from_texture())
 		volumetric_material.set_shader_parameter("blend_to_texture", _vol_renderer.get_blend_to_texture())
 		volumetric_material.set_shader_parameter("blend_amount", _vol_renderer.get_blend_amount())
+		# 新路徑：CompositorEffect 合成
+		if _vol_effect:
+			_vol_effect.blend_from_texture = _vol_renderer.get_blend_from_texture()
+			_vol_effect.blend_to_texture = _vol_renderer.get_blend_to_texture()
+			_vol_effect.blend_amount = _vol_renderer.get_blend_amount()
 
 
 #####################
@@ -201,6 +214,8 @@ func _update_color_correction() -> void:
 		fog_material.set_shader_parameter("color_correction", correction_params)
 		if volumetric_material:
 			volumetric_material.set_shader_parameter("color_correction", correction_params)
+		if _vol_effect:
+			_vol_effect.color_correction = correction_params
 
 
 #####################
@@ -294,7 +309,9 @@ func _update_sun_coords() -> void:
 		_sun_light_node.transform = _sun_transform
 	if _vol_renderer:
 		_vol_renderer.sun_direction = _sun_transform.origin
-		
+	if _vol_effect:
+		_vol_effect.sun_direction = _sun_transform.origin
+
 	_set_day_state(sun_altitude)
 	_update_night_intensity()
 	_update_sun_light_color()
@@ -468,6 +485,8 @@ func update_moon_coords() -> void:
 	fog_material.set_shader_parameter("moon_direction", _moon_transform.origin)
 	if _vol_renderer:
 		_vol_renderer.moon_direction = _moon_transform.origin
+	if _vol_effect:
+		_vol_effect.moon_direction = _moon_transform.origin
 	if _moon_light_node:
 		_moon_light_node.transform = _moon_transform
 	
@@ -888,7 +907,7 @@ const WIND_DIRECTION_OFFSET: float = deg_to_rad(-90)
 	get:
 		# We fetch the real wind direction by taking the angle from the clouds direction
 		# vector and correcting it for the offset again.
-		var real_wind_direction = _cloud_direction.angle() - WIND_DIRECTION_OFFSET
+		var real_wind_direction := _cloud_direction.angle() - WIND_DIRECTION_OFFSET
 		# What we do here is see if the wind direction we've stored in the property, as
 		# explained in 'set' above, is approximately equal to the direction we've just
 		# retrieved from the sky dome. This will be the case if we were the last to set it
@@ -930,6 +949,52 @@ func _check_cloud_processing() -> void:
 			set_process(false)
 
 
+
+
+## 把 VolumetricCloudEffect 註冊到場景的 Compositor
+func _register_compositor_effect() -> void:
+	if not _vol_effect or not environment:
+		return
+	var env_node: WorldEnvironment = _find_world_environment()
+	if not env_node:
+		return
+	if not env_node.compositor:
+		env_node.compositor = Compositor.new()
+	var effects: Array[CompositorEffect] = []
+	for e in env_node.compositor.compositor_effects:
+		effects.append(e)
+	if not effects.has(_vol_effect):
+		effects.append(_vol_effect)
+		env_node.compositor.compositor_effects = effects
+
+
+func _unregister_compositor_effect() -> void:
+	if not _vol_effect:
+		return
+	var env_node: WorldEnvironment = _find_world_environment()
+	if not env_node or not env_node.compositor:
+		return
+	var effects: Array[CompositorEffect] = []
+	for e in env_node.compositor.compositor_effects:
+		if e != _vol_effect:
+			effects.append(e)
+	env_node.compositor.compositor_effects = effects
+
+
+func _find_world_environment() -> WorldEnvironment:
+	if not is_inside_tree():
+		return null
+	return _recursive_find_env(get_tree().root)
+
+
+func _recursive_find_env(node: Node) -> WorldEnvironment:
+	for child in node.get_children():
+		if child is WorldEnvironment:
+			return child
+		var result: WorldEnvironment = _recursive_find_env(child)
+		if result:
+			return result
+	return null
 
 
 #####################
@@ -1114,6 +1179,9 @@ func _check_cloud_processing() -> void:
 		volumetric_visible = value
 		if volumetric_mesh:
 			volumetric_mesh.visible = value
+		if _vol_effect:
+			_vol_effect.clouds_enabled = value
+		_check_cloud_processing()
 
 @export_subgroup("Density")
 
@@ -1161,7 +1229,62 @@ func _check_cloud_processing() -> void:
 		if _vol_renderer:
 			_vol_renderer.use_weather = value
 
+@export_subgroup("Curl Noise")
+
+## Curl noise 強度（SSC2 風格的雲邊緣捲曲，0 = 關閉）
+@export_range(0.0, 10000.0, 100.0) var vol_curl_strength: float = 4500.0:
+	set(value):
+		vol_curl_strength = value
+		if _vol_renderer:
+			_vol_renderer.curl_strength = value
+
+## Curl noise 取樣尺度
+@export_range(0.00001, 0.001, 0.00001) var vol_curl_scale: float = 0.00005:
+	set(value):
+		vol_curl_scale = value
+		if _vol_renderer:
+			_vol_renderer.curl_noise_scale = value
+
+@export_subgroup("Wind Shear")
+
+## 風切強度（底部雲被風吹偏，0 = 關閉）
+@export_range(0.0, 5000.0, 10.0) var vol_wind_shear_power: float = 0.0:
+	set(value):
+		vol_wind_shear_power = value
+		if _vol_renderer:
+			_vol_renderer.wind_shear_power = value
+
+## 風切高度範圍（0~1，越小只影響越底部）
+@export_range(0.01, 1.0, 0.01) var vol_wind_shear_range: float = 0.54:
+	set(value):
+		vol_wind_shear_range = value
+		if _vol_renderer:
+			_vol_renderer.wind_shear_range = value
+
+@export_subgroup("Ambient Occlusion")
+
+## 雲底 AO 強度（0 = 關閉）
+@export_range(0.0, 1.0, 0.01) var vol_ao_strength: float = 0.3:
+	set(value):
+		vol_ao_strength = value
+		if _vol_renderer:
+			_vol_renderer.ao_strength = value
+
 @export_subgroup("Quality")
+
+## 光線步進次數（越高品質越好，越慢）
+@export_range(32, 256, 8) var vol_march_steps: int = 128:
+	set(value):
+		vol_march_steps = value
+		if _vol_renderer:
+			_vol_renderer.march_steps = float(value)
+
+## 陰影步進次數
+@export_range(2, 16, 1) var vol_shadow_steps: int = 6:
+	set(value):
+		vol_shadow_steps = value
+		if _vol_renderer:
+			_vol_renderer.shadow_steps = float(value)
 
 ## 渲染貼圖解析度（越高品質越好，越慢）
 @export_range(256, 2048, 64) var vol_texture_size: int = 768

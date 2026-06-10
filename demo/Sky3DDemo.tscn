@@ -25,6 +25,7 @@
 [ext_resource type="NoiseTexture3D" uid="uid://bnck2kxeg5bkg" path="res://addons/SunshineClouds2/NoiseTextures/SmallScaleNoise.tres" id="19_2dr7f"]
 [ext_resource type="Script" uid="uid://dmghenpaoxbyq" path="res://addons/sky_3d/src/CloudSkyAmbientSync.gd" id="20_clsky"]
 [ext_resource type="Script" path="res://addons/SunshineClouds2/SunshineCloudsWeatherController.gd" id="21_wctrl"]
+[ext_resource type="Script" path="res://demo/WeatherHotkeys.gd" id="22_whk"]
 
 [sub_resource type="GDScript" id="GDScript_v8wrf"]
 script/source = "extends Node3D
@@ -354,3 +355,7 @@ sky_dome = NodePath("../Sky3D/SkyDome")
 [node name="WeatherController" type="Node" parent="." node_paths=PackedStringArray("clouds_driver")]
 script = ExtResource("21_wctrl")
 clouds_driver = NodePath("../SunshineCloudsDriver")
+
+[node name="WeatherHotkeys" type="Node" parent="." node_paths=PackedStringArray("weather_controller")]
+script = ExtResource("22_whk")
+weather_controller = NodePath("../WeatherController")

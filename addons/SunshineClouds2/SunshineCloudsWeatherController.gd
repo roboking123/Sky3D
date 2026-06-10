@@ -129,6 +129,11 @@ func apply_immediately() -> void:
 	_過渡中 = false
 
 
+## 公開 API：是否正在過渡中（給 UI／demo 顯示狀態用）
+func is_transitioning() -> bool:
+	return _過渡中
+
+
 ## 公開 API：立刻觸發一道閃電（不限天氣型態，給劇情腳本用）
 func trigger_lightning() -> void:
 	if not is_inside_tree():

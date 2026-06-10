@@ -242,6 +242,7 @@ script = ExtResource("10_ssc2c")
 clouds_coverage = 0.84
 clouds_density = 0.1
 atmospheric_density = 0.3
+temporal_dither_stratification = true
 cloud_ambient_tint = Color(0.58, 0.6, 0.62, 1)
 ambient_occlusion_color = Color(0.45, 0.47, 0.52, 1)
 accumulation_decay = 0.95

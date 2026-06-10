@@ -72,8 +72,13 @@ class_name SunshineCloudsGD
 ## 時域自適應響應：幀間差異大時自動加快歷史更新，動雲不拖影、靜雲不噪（0 = 純指數混合）
 @export_range(0, 10) var temporal_responsiveness : float = 0.0
 ## 鄰域夾取強度（TAA 式）：歷史色夾進當幀 3×3 鄰域極值盒，殘影無法存活，
-## accumulation_decay 因此可安全拉高（長時域窗攤平薄雲邊緣的閃爍方差與週期搖晃）。0 = 關閉（位元級不變）
+## accumulation_decay 因此可安全拉高（長時域窗攤平薄雲邊緣的閃爍方差與週期搖晃）。0 = 關閉（位元級不變）。
+## 注意：對「次窗口小特徵」（遠處魚鱗雲胞）會把慢游移轉成快跳變，實測反效果，預設關閉備用
 @export_range(0.0, 1.0) var neighborhood_clamp_strength : float = 0.0
+## 分層化時域抖動：行進起點改用「靜態藍噪聲 + 黃金比例幀偏移」，連續幀的取樣起點
+## 均勻鋪滿步長區間（分層收斂，方差 1/N → 1/N²），從源頭攤平薄雲邊緣的泡泡斑與週期搖晃。
+## 關閉 = 舊行為（時間滾動藍噪聲，隨機收斂）
+@export var temporal_dither_stratification : bool = false
 
 @export_subgroup("Reflections")
 @export var reflections_globalshaderparam : String = ""
@@ -154,6 +159,8 @@ var weather_evolution_phase : float = 0.0
 # 上一幀相機資料（自建重投影用，修鏡頭旋轉時雲拖影破碎）
 var last_camera_tr : Transform3D = Transform3D.IDENTITY
 var last_proj : Projection = Projection()
+# 分層化抖動的幀計數（每幀上傳後遞增；4096 循環，float32 精度內 fract 無誤差累積）
+var _dither_frame_index : int = 0
 var has_last_matrices : bool = false
 
 @export_subgroup("Lights")
@@ -1137,8 +1144,9 @@ func update_matrices(camera_tr, view_proj, new_size: Vector2i):
 
 	general_data.encode_float(idx, near_flight_refinement); idx += 4
 	general_data.encode_float(idx, neighborhood_clamp_strength); idx += 4
-	general_data.encode_float(idx, 0.0); idx += 4 # reservedB
-	general_data.encode_float(idx, 0.0); idx += 4 # reservedC
+	general_data.encode_float(idx, 1.0 if temporal_dither_stratification else 0.0); idx += 4
+	general_data.encode_float(idx, float(_dither_frame_index)); idx += 4
+	_dither_frame_index = (_dither_frame_index + 1) % 4096
 
 	# 上一幀相機資料（自建重投影：scene_data 的 prev_data 不可靠，
 	# 會讓歷史幀貼著螢幕跑——鏡頭一轉雲就破碎拖影）

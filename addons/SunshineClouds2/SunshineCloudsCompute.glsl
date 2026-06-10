@@ -557,6 +557,15 @@ void main() {
 	float smallNoise = texture(dither_small, ditherUV).r;
 
 	float ditherValue = smallNoise;
+	// ─── 分層化時域抖動（stratified temporal dither）────────────────────
+	// 時間滾動藍噪聲的連續幀取樣是「隨機抽」，時域平均窗內覆蓋不均勻——
+	// 這正是薄雲邊緣泡泡斑與週期搖晃的源頭。改用靜態藍噪聲 + 黃金比例
+	// 幀偏移：每像素的行進起點在連續幀內均勻鋪滿 [0,1)（分層收斂，
+	// 方差 1/N → 1/N²），同時保留藍噪聲的空間去相關
+	if (genericData.data.ditherStratification > 0.5){
+		float blueNoiseStatic = texture(dither_small, vec3(depthUV.x * ditherScale, depthUV.y * ditherScale, 0.0)).r;
+		ditherValue = fract(blueNoiseStatic + 0.61803398875 * genericData.data.ditherFrameIndex);
+	}
 
 	//ATMOSPHERICS
 	vec3 ambientfogdistancecolor = genericData.data.ambientfogdistancecolor.rgb;

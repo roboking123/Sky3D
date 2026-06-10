@@ -341,6 +341,9 @@ struct GenericData{
 	mat4 prevViewMatrix;
 	mat4 prevProjectionMatrix;
 	vec4 prevCameraOrigin; // xyz = 上一幀相機世界座標原點
+	// 雲形參數：x = 天氣圖壓平強度（alpha 往中性值收攏 → 雲胞均勻鋪滿、
+	// 大尺度天空洞消失，魚鱗天等格狀雲用；0 = 關閉位元級不變）。yzw 保留
+	vec4 weatherShapeParams;
 };
 
 struct DirectionalLight {

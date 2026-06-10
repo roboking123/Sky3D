@@ -157,13 +157,20 @@ vec2 weatherHash(float n) {
 // 所以覆蓋圖案會隨相位無縫變形重組（不只平移）。相位 <= 0 時退回單張取樣（位元級不變）
 vec4 sampleWeatherMap(vec2 uv) {
 	float phase = genericData.data.weatherEvolvePhase;
+	vec4 result;
 	if (phase <= 0.0) {
-		return texture(extra_large_noise, uv);
+		result = texture(extra_large_noise, uv);
 	}
-	float weightA = abs(fract(phase) * 2.0 - 1.0);
-	vec4 sampleA = texture(extra_large_noise, uv + weatherHash(floor(phase + 0.5)));
-	vec4 sampleB = texture(extra_large_noise, uv + weatherHash(floor(phase) + 777.77));
-	return mix(sampleB, sampleA, weightA);
+	else {
+		float weightA = abs(fract(phase) * 2.0 - 1.0);
+		vec4 sampleA = texture(extra_large_noise, uv + weatherHash(floor(phase + 0.5)));
+		vec4 sampleB = texture(extra_large_noise, uv + weatherHash(floor(phase) + 777.77));
+		result = mix(sampleB, sampleA, weightA);
+	}
+	// 天氣圖壓平：alpha 往中性值收攏 → 門檻調制趨於均勻，雲胞大小一致鋪滿、
+	// 大尺度天空洞消失（真實魚鱗天 = 準週期格狀，由底層 cellular 噪聲呈現）。0 = 位元級不變
+	result.a = mix(result.a, 0.55, genericData.data.weatherShapeParams.x);
+	return result;
 }
 
 // 雲種垂直剖面（Nubis 風格雲種語言）：type 0→0.5→1 對應

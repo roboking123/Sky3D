@@ -79,6 +79,9 @@ class_name SunshineCloudsGD
 ## 均勻鋪滿步長區間（分層收斂，方差 1/N → 1/N²），從源頭攤平薄雲邊緣的泡泡斑與週期搖晃。
 ## 關閉 = 舊行為（時間滾動藍噪聲，隨機收斂）
 @export var temporal_dither_stratification : bool = false
+## 天氣圖壓平：天氣圖 alpha 往中性值 0.55 收攏，雲胞大小趨於一致、均勻鋪滿天空、
+## 大尺度天空洞消失——魚鱗天（卷積雲格狀排列）等型態用。0 = 關閉（位元級不變）
+@export_range(0.0, 1.0) var weather_map_flatten : float = 0.0
 
 @export_subgroup("Reflections")
 @export var reflections_globalshaderparam : String = ""
@@ -570,7 +573,7 @@ func _render_callback(effect_callback_type, render_data):
 					#reflections
 					accumulation_textures.append(rd.texture_create(base_colorformat, RDTextureView.new(), [blankImageData]))
 					
-					general_data_buffer = rd.uniform_buffer_create(496)
+					general_data_buffer = rd.uniform_buffer_create(512)
 					
 					var depthformat : RDTextureFormat = rd.texture_get_format(depth_image)
 					depthformat.width = new_size.x
@@ -917,8 +920,8 @@ func retrieve_position_queries(data : PackedByteArray):
 			#self.effect_callback_type = CompositorEffect.EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
 
 func update_matrices(camera_tr, view_proj, new_size: Vector2i):
-	if general_data.size() != 496: #124 * 4 bytes for each float = 496（含 2 個 mat4 + 1 個 vec4 的上一幀相機資料）.
-		general_data.resize(496)
+	if general_data.size() != 512: #128 * 4 bytes = 512（含上一幀相機資料 2 mat4 + 1 vec4，以及雲形參數 1 vec4）.
+		general_data.resize(512)
 	
 	var idx = 0
 	filter_index += 1
@@ -1160,6 +1163,12 @@ func update_matrices(camera_tr, view_proj, new_size: Vector2i):
 	general_data.encode_float(idx, prev_camera_tr.origin.y); idx += 4
 	general_data.encode_float(idx, prev_camera_tr.origin.z); idx += 4
 	general_data.encode_float(idx, 1.0); idx += 4
+
+	# 雲形參數 vec4：x = 天氣圖壓平，yzw 保留
+	general_data.encode_float(idx, weather_map_flatten); idx += 4
+	general_data.encode_float(idx, 0.0); idx += 4
+	general_data.encode_float(idx, 0.0); idx += 4
+	general_data.encode_float(idx, 0.0); idx += 4
 
 	last_camera_tr = camera_tr
 	last_proj = view_proj

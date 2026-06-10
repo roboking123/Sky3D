@@ -65,14 +65,16 @@ enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM, CIRROCUMULUS, SCATTERE
 # 魚鱗雲 0.84 / 散積雲 0.76 由 CPU 離線重現 shader 數學掃描而得（存在率約 62% / 28%）。
 # TODO（未來項目）：根治＝shader 端鏈式 remap 把 coverage 線性化（Schneider 慣例）；
 # 會位移所有既有視覺、四種天氣基準需整批重調，動工前先凍結一份現役視覺快照
+# floor_m / ceiling_m：雲層底/頂高度（公尺）。既有四型固定 demo 基準（1500/16000）。
+# 魚鱗雲＝高雲族（卷積雲 5~12km）抬到 6000~14000；散積雲＝低雲族，頂壓到 9000
 const PRESETS: Dictionary = {
-	WeatherType.CLEAR:             {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
-	WeatherType.PARTLY_CLOUDY:     {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
-	WeatherType.OVERCAST:          {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
-	WeatherType.STORM:             {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
-	WeatherType.CIRROCUMULUS:      {"coverage": 0.84, "density": 0.08, "atmo": 0.30, "evolve": 0.003, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 20000.0, "md_scale": 9000.0},
-	WeatherType.SCATTERED_CUMULUS: {"coverage": 0.76, "density": 0.30, "atmo": 0.35, "evolve": 0.003, "type_bias": 0.45, "xl_scale": 140000.0, "lg_scale": 70000.0, "md_scale": 20000.0},
-	WeatherType.RAIN:              {"coverage": 1.0, "density": 1.60, "atmo": 1.10, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
+	WeatherType.CLEAR:             {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
+	WeatherType.PARTLY_CLOUDY:     {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
+	WeatherType.OVERCAST:          {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
+	WeatherType.STORM:             {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
+	WeatherType.CIRROCUMULUS:      {"coverage": 0.84, "density": 0.10, "atmo": 0.30, "evolve": 0.003, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 20000.0, "md_scale": 9000.0, "floor_m": 6000.0, "ceiling_m": 14000.0},
+	WeatherType.SCATTERED_CUMULUS: {"coverage": 0.76, "density": 0.30, "atmo": 0.35, "evolve": 0.003, "type_bias": 0.45, "xl_scale": 140000.0, "lg_scale": 70000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 9000.0},
+	WeatherType.RAIN:              {"coverage": 1.0, "density": 1.60, "atmo": 1.10, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
 }
 
 var _過渡中: bool = false
@@ -85,6 +87,8 @@ var _起點雲種偏置: float = 0.0
 var _起點特大尺度: float = 0.0
 var _起點大尺度: float = 0.0
 var _起點中尺度: float = 0.0
+var _起點雲底_m: float = 0.0
+var _起點雲頂_m: float = 0.0
 var _循環倒數: float = 0.0
 
 # 閃電狀態
@@ -128,6 +132,8 @@ func _process(delta: float) -> void:
 		res.extra_large_noise_scale = lerpf(_起點特大尺度, preset["xl_scale"], t)
 		res.large_noise_scale = lerpf(_起點大尺度, preset["lg_scale"], t)
 		res.medium_noise_scale = lerpf(_起點中尺度, preset["md_scale"], t)
+		res.cloud_floor = lerpf(_起點雲底_m, preset["floor_m"], t)
+		res.cloud_ceiling = lerpf(_起點雲頂_m, preset["ceiling_m"], t)
 		if t >= 1.0:
 			_過渡中 = false
 
@@ -153,6 +159,8 @@ func apply_immediately() -> void:
 	res.extra_large_noise_scale = preset["xl_scale"]
 	res.large_noise_scale = preset["lg_scale"]
 	res.medium_noise_scale = preset["md_scale"]
+	res.cloud_floor = preset["floor_m"]
+	res.cloud_ceiling = preset["ceiling_m"]
 	_過渡中 = false
 
 
@@ -258,6 +266,8 @@ func _開始過渡() -> void:
 	_起點特大尺度 = res.extra_large_noise_scale
 	_起點大尺度 = res.large_noise_scale
 	_起點中尺度 = res.medium_noise_scale
+	_起點雲底_m = res.cloud_floor
+	_起點雲頂_m = res.cloud_ceiling
 	_過渡計時 = 0.0
 	_過渡中 = true
 	# 進入暴風：第一道閃電等到過渡過半再打（天空夠陰才打雷，視覺不突兀）

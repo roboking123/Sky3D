@@ -67,15 +67,18 @@ enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM, CIRROCUMULUS, SCATTERE
 # 會位移所有既有視覺、四種天氣基準需整批重調，動工前先凍結一份現役視覺快照
 # floor_m / ceiling_m：雲層底/頂高度（公尺）。多雲＝使用者基準、暴風/雨天需高層給雲塔，維持 1500/16000。
 # 陰天＝低雲毯壓到 8000 頂（與多雲拉開差距）；魚鱗雲＝高雲族（卷積雲 5~12km）抬到 6000~14000；散積雲＝低雲族，頂壓到 9000。
-# 魚鱗雲 evolve 壓極低 + md_scale 取 12000：高空卷積雲穩定少變形，並降低時域閃爍的高頻侵蝕源
+# 魚鱗雲 evolve 壓極低 + md_scale 取 12000：高空卷積雲穩定少變形，並降低時域閃爍的高頻侵蝕源。
+# wind_mult：驅動器四層風速的倍率（只在執行期套用，編輯器不動 driver）。
+# 閃爍量測（demo/tools/flicker_bench.gd）實證雲緣閃爍與風速近線性（全速 σ9.2／半速 σ5.1／凍結 σ1.6），
+# 魚鱗雲 0.25 一石二鳥：高空卷積雲視覺上本就近乎靜止，同時把閃爍壓向機制地板
 const PRESETS: Dictionary = {
-	WeatherType.CLEAR:             {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
-	WeatherType.PARTLY_CLOUDY:     {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
-	WeatherType.OVERCAST:          {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 8000.0},
-	WeatherType.STORM:             {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
-	WeatherType.CIRROCUMULUS:      {"coverage": 0.84, "density": 0.10, "atmo": 0.30, "evolve": 0.0005, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 20000.0, "md_scale": 12000.0, "floor_m": 6000.0, "ceiling_m": 14000.0},
-	WeatherType.SCATTERED_CUMULUS: {"coverage": 0.76, "density": 0.30, "atmo": 0.35, "evolve": 0.003, "type_bias": 0.45, "xl_scale": 140000.0, "lg_scale": 70000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 9000.0},
-	WeatherType.RAIN:              {"coverage": 1.0, "density": 1.60, "atmo": 1.10, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
+	WeatherType.CLEAR:             {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0},
+	WeatherType.PARTLY_CLOUDY:     {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0},
+	WeatherType.OVERCAST:          {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 8000.0, "wind_mult": 1.0},
+	WeatherType.STORM:             {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0},
+	WeatherType.CIRROCUMULUS:      {"coverage": 0.84, "density": 0.10, "atmo": 0.30, "evolve": 0.0005, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 20000.0, "md_scale": 12000.0, "floor_m": 6000.0, "ceiling_m": 14000.0, "wind_mult": 0.25},
+	WeatherType.SCATTERED_CUMULUS: {"coverage": 0.76, "density": 0.30, "atmo": 0.35, "evolve": 0.003, "type_bias": 0.45, "xl_scale": 140000.0, "lg_scale": 70000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 9000.0, "wind_mult": 0.7},
+	WeatherType.RAIN:              {"coverage": 1.0, "density": 1.60, "atmo": 1.10, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0},
 }
 
 var _過渡中: bool = false
@@ -91,6 +94,11 @@ var _起點中尺度: float = 0.0
 var _起點雲底_m: float = 0.0
 var _起點雲頂_m: float = 0.0
 var _循環倒數: float = 0.0
+
+# 風速倍率狀態：基準風速懶捕捉一次（之後不重抓，避免倍率複利漂移）
+var _目前風速倍率: float = 1.0
+var _起點風速倍率: float = 1.0
+var _基準風速: Array[float] = []
 
 # 閃電狀態
 var _閃電燈: OmniLight3D = null
@@ -135,6 +143,7 @@ func _process(delta: float) -> void:
 		res.medium_noise_scale = lerpf(_起點中尺度, preset["md_scale"], t)
 		res.cloud_floor = lerpf(_起點雲底_m, preset["floor_m"], t)
 		res.cloud_ceiling = lerpf(_起點雲頂_m, preset["ceiling_m"], t)
+		_套用風速倍率(lerpf(_起點風速倍率, preset["wind_mult"], t))
 		if t >= 1.0:
 			_過渡中 = false
 
@@ -162,6 +171,7 @@ func apply_immediately() -> void:
 	res.medium_noise_scale = preset["md_scale"]
 	res.cloud_floor = preset["floor_m"]
 	res.cloud_ceiling = preset["ceiling_m"]
+	_套用風速倍率(preset["wind_mult"])
 	_過渡中 = false
 
 
@@ -240,11 +250,36 @@ func _更新閃電(delta: float) -> void:
 			_閃電燈.light_energy = 閃電強度 * randf_range(0.6, 1.0)
 
 
+# 把天氣風速倍率套到驅動器的四層風速。
+# 編輯器一律不動 driver：倍率後的值若被存進場景，下次載入會把它誤當基準（複利漂移）
+func _套用風速倍率(mult: float) -> void:
+	_目前風速倍率 = mult
+	if Engine.is_editor_hint() or clouds_driver == null:
+		return
+	if _基準風速.is_empty():
+		_基準風速 = [
+			clouds_driver.extra_large_structures_wind_speed,
+			clouds_driver.large_structures_wind_speed,
+			clouds_driver.medium_structures_wind_speed,
+			clouds_driver.small_structures_wind_speed,
+		]
+	clouds_driver.extra_large_structures_wind_speed = _基準風速[0] * mult
+	clouds_driver.large_structures_wind_speed = _基準風速[1] * mult
+	clouds_driver.medium_structures_wind_speed = _基準風速[2] * mult
+	clouds_driver.small_structures_wind_speed = _基準風速[3] * mult
+
+
 func _exit_tree() -> void:
 	# 從驅動器移除閃電燈，避免殘留懸空引用（is_instance_valid 擋已釋放的 driver）
 	if _閃電燈已註冊 and is_instance_valid(clouds_driver) and _閃電燈 != null:
 		clouds_driver.tracked_point_lights.erase(_閃電燈)
 		_閃電燈已註冊 = false
+	# 還原驅動器基準風速（控制器移除後不留下倍率污染）
+	if not _基準風速.is_empty() and is_instance_valid(clouds_driver):
+		clouds_driver.extra_large_structures_wind_speed = _基準風速[0]
+		clouds_driver.large_structures_wind_speed = _基準風速[1]
+		clouds_driver.medium_structures_wind_speed = _基準風速[2]
+		clouds_driver.small_structures_wind_speed = _基準風速[3]
 
 
 func _取得雲資源() -> SunshineCloudsGD:
@@ -269,6 +304,7 @@ func _開始過渡() -> void:
 	_起點中尺度 = res.medium_noise_scale
 	_起點雲底_m = res.cloud_floor
 	_起點雲頂_m = res.cloud_ceiling
+	_起點風速倍率 = _目前風速倍率
 	_過渡計時 = 0.0
 	_過渡中 = true
 	# 進入暴風：第一道閃電等到過渡過半再打（天空夠陰才打雷，視覺不突兀）

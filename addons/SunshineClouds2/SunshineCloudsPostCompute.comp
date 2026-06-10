@@ -178,13 +178,19 @@ vec2 weatherHashPost(float n) {
 // 天氣圖演化取樣（與主 compute 的 sampleWeatherMap 同邏輯，保持雲影與雲本體同步演化）
 vec4 sampleWeatherMapPost(vec2 uv) {
 	float phase = genericData.data.weatherEvolvePhase;
+	vec4 result;
 	if (phase <= 0.0) {
-		return texture(extra_large_noise, uv);
+		result = texture(extra_large_noise, uv);
 	}
-	float weightA = abs(fract(phase) * 2.0 - 1.0);
-	vec4 sampleA = texture(extra_large_noise, uv + weatherHashPost(floor(phase + 0.5)));
-	vec4 sampleB = texture(extra_large_noise, uv + weatherHashPost(floor(phase) + 777.77));
-	return mix(sampleB, sampleA, weightA);
+	else {
+		float weightA = abs(fract(phase) * 2.0 - 1.0);
+		vec4 sampleA = texture(extra_large_noise, uv + weatherHashPost(floor(phase + 0.5)));
+		vec4 sampleB = texture(extra_large_noise, uv + weatherHashPost(floor(phase) + 777.77));
+		result = mix(sampleB, sampleA, weightA);
+	}
+	// 天氣圖壓平（與主 compute 同步，雲影跟著均勻化）。0 = 位元級不變
+	result.a = mix(result.a, 0.55, genericData.data.weatherShapeParams.x);
+	return result;
 }
 
 // 雲影透射率：從世界點沿太陽方向穿過雲層，用天氣圖近似光學深度。

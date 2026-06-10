@@ -72,15 +72,17 @@ enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM, CIRROCUMULUS, SCATTERE
 # 閃爍量測（demo/tools/flicker_bench.gd）實證雲緣閃爍與風速近線性（全速 σ9.2／半速 σ5.1／凍結 σ1.6），
 # 魚鱗雲 0.25 一石二鳥：高空卷積雲視覺上本就近乎靜止，同時把閃爍壓向機制地板。
 # resp（temporal_responsiveness）：熱圖實測 0.5 讓雲緣閃爍 +60%，但暴風閃電需要它快速反應——
-# 故按天氣分配：魚鱗雲 0（穩定高雲）、散積雲 0.3、其餘維持 0.5 基準
+# 故按天氣分配：魚鱗雲 0（穩定高雲）、散積雲 0.3、其餘維持 0.5 基準。
+# flatten（weather_map_flatten）：天氣圖壓平——魚鱗雲 0.85 讓雲胞大小一致、均勻鋪滿、大洞消失
+#（真實魚鱗天是準週期格狀排列，靠底層 cellular 噪聲呈現格子）；其餘 0 不變
 const PRESETS: Dictionary = {
-	WeatherType.CLEAR:             {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0, "resp": 0.5},
-	WeatherType.PARTLY_CLOUDY:     {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0, "resp": 0.5},
-	WeatherType.OVERCAST:          {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 8000.0, "wind_mult": 1.0, "resp": 0.5},
-	WeatherType.STORM:             {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0, "resp": 0.5},
-	WeatherType.CIRROCUMULUS:      {"coverage": 0.84, "density": 0.10, "atmo": 0.30, "evolve": 0.0005, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 20000.0, "md_scale": 12000.0, "floor_m": 6000.0, "ceiling_m": 14000.0, "wind_mult": 0.25, "resp": 0.0},
-	WeatherType.SCATTERED_CUMULUS: {"coverage": 0.76, "density": 0.30, "atmo": 0.35, "evolve": 0.003, "type_bias": 0.45, "xl_scale": 140000.0, "lg_scale": 70000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 9000.0, "wind_mult": 0.7, "resp": 0.3},
-	WeatherType.RAIN:              {"coverage": 1.0, "density": 1.60, "atmo": 1.10, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0, "resp": 0.5},
+	WeatherType.CLEAR:             {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0, "resp": 0.5, "flatten": 0.0},
+	WeatherType.PARTLY_CLOUDY:     {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0, "resp": 0.5, "flatten": 0.0},
+	WeatherType.OVERCAST:          {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 8000.0, "wind_mult": 1.0, "resp": 0.5, "flatten": 0.0},
+	WeatherType.STORM:             {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0, "resp": 0.5, "flatten": 0.0},
+	WeatherType.CIRROCUMULUS:      {"coverage": 0.84, "density": 0.28, "atmo": 0.30, "evolve": 0.0005, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 14000.0, "md_scale": 9000.0, "floor_m": 6000.0, "ceiling_m": 14000.0, "wind_mult": 0.25, "resp": 0.0, "flatten": 0.85},
+	WeatherType.SCATTERED_CUMULUS: {"coverage": 0.76, "density": 0.30, "atmo": 0.35, "evolve": 0.003, "type_bias": 0.45, "xl_scale": 140000.0, "lg_scale": 70000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 9000.0, "wind_mult": 0.7, "resp": 0.3, "flatten": 0.0},
+	WeatherType.RAIN:              {"coverage": 1.0, "density": 1.60, "atmo": 1.10, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0, "wind_mult": 1.0, "resp": 0.5, "flatten": 0.0},
 }
 
 var _過渡中: bool = false
@@ -96,6 +98,7 @@ var _起點中尺度: float = 0.0
 var _起點雲底_m: float = 0.0
 var _起點雲頂_m: float = 0.0
 var _起點響應: float = 0.0
+var _起點壓平: float = 0.0
 var _循環倒數: float = 0.0
 
 # 風速倍率狀態：基準風速懶捕捉一次（之後不重抓，避免倍率複利漂移）
@@ -113,15 +116,11 @@ var _脈衝間隔計時: float = 0.0
 
 func _ready() -> void:
 	_重置循環倒數()
-	# 啟動時補套目前天氣的「系統管理參數」（風速倍率、時域響應）：
-	# 場景存檔時若停在非預設天氣，不補套會卡在舊值；
-	# 且再按同天氣快捷鍵因「值未變」不會觸發 setter
+	# 啟動時完整套用目前天氣的預設（執行期 PRESETS 是唯一真相）：
+	# 場景存檔時殘留的舊參數或編輯器預覽值一律覆蓋，
+	# 否則按同天氣快捷鍵因「值未變」不觸發 setter、永遠卡舊值
 	if not Engine.is_editor_hint():
-		var preset: Dictionary = PRESETS[目前天氣]
-		_套用風速倍率(preset["wind_mult"])
-		var res: SunshineCloudsGD = _取得雲資源()
-		if res != null:
-			res.temporal_responsiveness = preset["resp"]
+		apply_immediately()
 
 
 func _process(delta: float) -> void:
@@ -156,6 +155,7 @@ func _process(delta: float) -> void:
 		res.cloud_floor = lerpf(_起點雲底_m, preset["floor_m"], t)
 		res.cloud_ceiling = lerpf(_起點雲頂_m, preset["ceiling_m"], t)
 		res.temporal_responsiveness = lerpf(_起點響應, preset["resp"], t)
+		res.weather_map_flatten = lerpf(_起點壓平, preset["flatten"], t)
 		_套用風速倍率(lerpf(_起點風速倍率, preset["wind_mult"], t))
 		if t >= 1.0:
 			_過渡中 = false
@@ -185,6 +185,7 @@ func apply_immediately() -> void:
 	res.cloud_floor = preset["floor_m"]
 	res.cloud_ceiling = preset["ceiling_m"]
 	res.temporal_responsiveness = preset["resp"]
+	res.weather_map_flatten = preset["flatten"]
 	_套用風速倍率(preset["wind_mult"])
 	_過渡中 = false
 
@@ -319,6 +320,7 @@ func _開始過渡() -> void:
 	_起點雲底_m = res.cloud_floor
 	_起點雲頂_m = res.cloud_ceiling
 	_起點響應 = res.temporal_responsiveness
+	_起點壓平 = res.weather_map_flatten
 	_起點風速倍率 = _目前風速倍率
 	_過渡計時 = 0.0
 	_過渡中 = true

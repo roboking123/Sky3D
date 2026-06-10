@@ -59,14 +59,17 @@ enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM, CIRROCUMULUS, SCATTERE
 # PARTLY_CLOUDY 取 demo 調好的基準值，掛上節點預設不改變現有視覺。
 # 噪聲尺度控制雲胞大小：魚鱗雲=小胞滿天、散積雲=大胞孤立；既有四型固定 demo 基準尺度（100000/60000/20000）不變。
 # RAIN = 複製 STORM 再調暗（密度與濁度拉高，形狀語言相同）。
-# type_bias 只在雲資源的 cloud_type_variation > 0 時有視覺效果
+# type_bias 只在雲資源的 cloud_type_variation > 0 時有視覺效果。
+# 注意：coverage 是「大噪聲×天氣圖×高度梯度」乘積的門檻，乘積值域上限約 0.45，
+# 所以有效範圍約 0.58（近乎無雲）~ 1.0（蓋滿），不是線性的天空覆蓋比例。
+# 魚鱗雲 0.84 / 散積雲 0.76 由 CPU 離線重現 shader 數學掃描而得（存在率約 62% / 28%）
 const PRESETS: Dictionary = {
 	WeatherType.CLEAR:             {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
 	WeatherType.PARTLY_CLOUDY:     {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
 	WeatherType.OVERCAST:          {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
 	WeatherType.STORM:             {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
-	WeatherType.CIRROCUMULUS:      {"coverage": 0.62, "density": 0.06, "atmo": 0.30, "evolve": 0.003, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 20000.0, "md_scale": 9000.0},
-	WeatherType.SCATTERED_CUMULUS: {"coverage": 0.45, "density": 0.30, "atmo": 0.35, "evolve": 0.003, "type_bias": 0.45, "xl_scale": 140000.0, "lg_scale": 70000.0, "md_scale": 20000.0},
+	WeatherType.CIRROCUMULUS:      {"coverage": 0.84, "density": 0.08, "atmo": 0.30, "evolve": 0.003, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 20000.0, "md_scale": 9000.0},
+	WeatherType.SCATTERED_CUMULUS: {"coverage": 0.76, "density": 0.30, "atmo": 0.35, "evolve": 0.003, "type_bias": 0.45, "xl_scale": 140000.0, "lg_scale": 70000.0, "md_scale": 20000.0},
 	WeatherType.RAIN:              {"coverage": 1.0, "density": 1.60, "atmo": 1.10, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
 }
 

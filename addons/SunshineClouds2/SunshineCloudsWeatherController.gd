@@ -110,6 +110,11 @@ var _脈衝間隔計時: float = 0.0
 
 func _ready() -> void:
 	_重置循環倒數()
+	# 啟動時套用目前天氣的風速倍率：場景存檔時若停在非預設天氣（例如魚鱗雲），
+	# 不補套會卡在 1.0 全速；且再按同天氣快捷鍵因「值未變」不會觸發 setter
+	if not Engine.is_editor_hint():
+		var preset: Dictionary = PRESETS[目前天氣]
+		_套用風速倍率(preset["wind_mult"])
 
 
 func _process(delta: float) -> void:

@@ -62,7 +62,9 @@ enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM, CIRROCUMULUS, SCATTERE
 # type_bias 只在雲資源的 cloud_type_variation > 0 時有視覺效果。
 # 注意：coverage 是「大噪聲×天氣圖×高度梯度」乘積的門檻，乘積值域上限約 0.45，
 # 所以有效範圍約 0.58（近乎無雲）~ 1.0（蓋滿），不是線性的天空覆蓋比例。
-# 魚鱗雲 0.84 / 散積雲 0.76 由 CPU 離線重現 shader 數學掃描而得（存在率約 62% / 28%）
+# 魚鱗雲 0.84 / 散積雲 0.76 由 CPU 離線重現 shader 數學掃描而得（存在率約 62% / 28%）。
+# TODO（未來項目）：根治＝shader 端鏈式 remap 把 coverage 線性化（Schneider 慣例）；
+# 會位移所有既有視覺、四種天氣基準需整批重調，動工前先凍結一份現役視覺快照
 const PRESETS: Dictionary = {
 	WeatherType.CLEAR:             {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
 	WeatherType.PARTLY_CLOUDY:     {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},

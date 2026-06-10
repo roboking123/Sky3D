@@ -53,7 +53,7 @@ enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM }
 # type_bias 只在雲資源的 cloud_type_variation > 0 時有視覺效果
 const PRESETS: Dictionary = {
 	WeatherType.CLEAR:         {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4},
-	WeatherType.PARTLY_CLOUDY: {"coverage": 0.862, "density": 0.14, "atmo": 0.40, "evolve": 0.004, "type_bias": 0.0},
+	WeatherType.PARTLY_CLOUDY: {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0},
 	WeatherType.OVERCAST:      {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6},
 	WeatherType.STORM:         {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7},
 }

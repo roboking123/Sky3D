@@ -331,7 +331,7 @@ struct GenericData{
 	float cloudExposureEV;			// 雲輻射曝光補償 EV（0 = 不動）
 
 	float nearFlightRefinement;		// 穿雲近場步進細化（0 = 關）
-	float reservedA;
+	float neighborhoodClampStrength;	// 鄰域夾取強度（TAA 式 AABB；0 = 關，位元級不變）
 	float reservedB;
 	float reservedC;
 

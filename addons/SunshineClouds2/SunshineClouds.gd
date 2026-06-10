@@ -71,6 +71,9 @@ class_name SunshineCloudsGD
 @export_range(-4, 4) var cloud_exposure_ev : float = 0.0
 ## 時域自適應響應：幀間差異大時自動加快歷史更新，動雲不拖影、靜雲不噪（0 = 純指數混合）
 @export_range(0, 10) var temporal_responsiveness : float = 0.0
+## 鄰域夾取強度（TAA 式）：歷史色夾進當幀 3×3 鄰域極值盒，殘影無法存活，
+## accumulation_decay 因此可安全拉高（長時域窗攤平薄雲邊緣的閃爍方差與週期搖晃）。0 = 關閉（位元級不變）
+@export_range(0.0, 1.0) var neighborhood_clamp_strength : float = 0.0
 
 @export_subgroup("Reflections")
 @export var reflections_globalshaderparam : String = ""
@@ -1133,7 +1136,7 @@ func update_matrices(camera_tr, view_proj, new_size: Vector2i):
 	general_data.encode_float(idx, cloud_exposure_ev); idx += 4
 
 	general_data.encode_float(idx, near_flight_refinement); idx += 4
-	general_data.encode_float(idx, 0.0); idx += 4 # reservedA
+	general_data.encode_float(idx, neighborhood_clamp_strength); idx += 4
 	general_data.encode_float(idx, 0.0); idx += 4 # reservedB
 	general_data.encode_float(idx, 0.0); idx += 4 # reservedC
 

@@ -1,7 +1,8 @@
 extends Node
 
 ## demo 專用天氣快捷鍵入口：
-## 1 晴朗 / 2 多雲 / 3 陰天 / 4 暴風 / L 立刻閃電 / P 自動循環開關
+## 1 晴朗 / 2 多雲 / 3 陰天 / 4 暴風 / 5 魚鱗雲 / 6 散積雲 / 7 雨天
+## L 立刻閃電 / P 自動循環開關
 ## 左上角第二行顯示目前天氣與過渡狀態（第一行是相機高度）。
 
 @export var weather_controller: SunshineCloudsWeatherController
@@ -11,6 +12,9 @@ const WEATHER_NAMES: Dictionary = {
 	SunshineCloudsWeatherController.WeatherType.PARTLY_CLOUDY: "多雲",
 	SunshineCloudsWeatherController.WeatherType.OVERCAST: "陰天",
 	SunshineCloudsWeatherController.WeatherType.STORM: "暴風",
+	SunshineCloudsWeatherController.WeatherType.CIRROCUMULUS: "魚鱗雲",
+	SunshineCloudsWeatherController.WeatherType.SCATTERED_CUMULUS: "散積雲",
+	SunshineCloudsWeatherController.WeatherType.RAIN: "雨天",
 }
 
 var _label: Label = null
@@ -30,7 +34,7 @@ func _process(_delta: float) -> void:
 		return
 	var status: String = "（過渡中…）" if weather_controller.is_transitioning() else ""
 	var auto_text: String = "開" if weather_controller.自動循環 else "關"
-	_label.text = "天氣：%s%s  [1 晴朗 / 2 多雲 / 3 陰天 / 4 暴風 / L 閃電 / P 自動循環：%s]" % [
+	_label.text = "天氣：%s%s  [1晴朗 2多雲 3陰天 4暴風 5魚鱗雲 6散積雲 7雨天 / L 閃電 / P 自動循環：%s]" % [
 		WEATHER_NAMES.get(weather_controller.目前天氣, "?"), status, auto_text]
 
 
@@ -49,6 +53,12 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			weather_controller.set_weather(SunshineCloudsWeatherController.WeatherType.OVERCAST)
 		KEY_4, KEY_KP_4:
 			weather_controller.set_weather(SunshineCloudsWeatherController.WeatherType.STORM)
+		KEY_5, KEY_KP_5:
+			weather_controller.set_weather(SunshineCloudsWeatherController.WeatherType.CIRROCUMULUS)
+		KEY_6, KEY_KP_6:
+			weather_controller.set_weather(SunshineCloudsWeatherController.WeatherType.SCATTERED_CUMULUS)
+		KEY_7, KEY_KP_7:
+			weather_controller.set_weather(SunshineCloudsWeatherController.WeatherType.RAIN)
 		KEY_L:
 			weather_controller.trigger_lightning()
 		KEY_P:

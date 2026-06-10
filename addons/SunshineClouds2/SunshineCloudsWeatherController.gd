@@ -4,13 +4,14 @@ class_name SunshineCloudsWeatherController
 
 ## 天氣狀態機（Weather Controller）
 ##
-## 在預設天氣型態（晴朗／多雲／陰天／暴風）之間平滑過渡 SSC2 的
-## 覆蓋率、密度、大氣濁度與天氣圖演化速度，並可自動循環漫遊。
+## 在預設天氣型態（晴朗／多雲／陰天／暴風／魚鱗雲／散積雲／雨天）之間
+## 平滑過渡 SSC2 的覆蓋率、密度、大氣濁度、噪聲尺度與天氣圖演化速度，
+## 並可自動循環漫遊。
 ##
 ## 純外掛節點：只寫 clouds_resource 的公開屬性，不碰 SSC2 源碼；
 ## 可與 CloudSkyAmbientSync 並存（兩者管的欄位不重疊）。
 
-enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM }
+enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM, CIRROCUMULUS, SCATTERED_CUMULUS, RAIN }
 
 ## 要驅動的 SSC2 雲驅動器（取它身上的 clouds_resource）
 @export var clouds_driver: SunshineCloudsDriverGD
@@ -54,14 +55,19 @@ enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM }
 ## 同時照亮場景：閃電點光也作為真實場景光源（地面跟著閃）
 @export var 閃電照亮場景: bool = true
 
-# 每個型態的目標參數：覆蓋率 / 密度 / 大氣濁度 / 天氣圖演化速度 / 雲種偏置。
+# 每個型態的目標參數：覆蓋率 / 密度 / 大氣濁度 / 天氣圖演化速度 / 雲種偏置 / 三層噪聲尺度（公尺）。
 # PARTLY_CLOUDY 取 demo 調好的基準值，掛上節點預設不改變現有視覺。
+# 噪聲尺度控制雲胞大小：魚鱗雲=小胞滿天、散積雲=大胞孤立；既有四型固定 demo 基準尺度（100000/60000/20000）不變。
+# RAIN = 複製 STORM 再調暗（密度與濁度拉高，形狀語言相同）。
 # type_bias 只在雲資源的 cloud_type_variation > 0 時有視覺效果
 const PRESETS: Dictionary = {
-	WeatherType.CLEAR:         {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4},
-	WeatherType.PARTLY_CLOUDY: {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0},
-	WeatherType.OVERCAST:      {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6},
-	WeatherType.STORM:         {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7},
+	WeatherType.CLEAR:             {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
+	WeatherType.PARTLY_CLOUDY:     {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
+	WeatherType.OVERCAST:          {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
+	WeatherType.STORM:             {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
+	WeatherType.CIRROCUMULUS:      {"coverage": 0.62, "density": 0.06, "atmo": 0.30, "evolve": 0.003, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 20000.0, "md_scale": 9000.0},
+	WeatherType.SCATTERED_CUMULUS: {"coverage": 0.45, "density": 0.30, "atmo": 0.35, "evolve": 0.003, "type_bias": 0.45, "xl_scale": 140000.0, "lg_scale": 70000.0, "md_scale": 20000.0},
+	WeatherType.RAIN:              {"coverage": 1.0, "density": 1.60, "atmo": 1.10, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0},
 }
 
 var _過渡中: bool = false
@@ -71,6 +77,9 @@ var _起點密度: float = 0.0
 var _起點濁度: float = 0.0
 var _起點演化速度: float = 0.0
 var _起點雲種偏置: float = 0.0
+var _起點特大尺度: float = 0.0
+var _起點大尺度: float = 0.0
+var _起點中尺度: float = 0.0
 var _循環倒數: float = 0.0
 
 # 閃電狀態
@@ -111,6 +120,9 @@ func _process(delta: float) -> void:
 		res.atmospheric_density = lerpf(_起點濁度, preset["atmo"], t)
 		res.weather_evolution_speed = lerpf(_起點演化速度, preset["evolve"], t)
 		res.cloud_type_bias = lerpf(_起點雲種偏置, preset["type_bias"], t)
+		res.extra_large_noise_scale = lerpf(_起點特大尺度, preset["xl_scale"], t)
+		res.large_noise_scale = lerpf(_起點大尺度, preset["lg_scale"], t)
+		res.medium_noise_scale = lerpf(_起點中尺度, preset["md_scale"], t)
 		if t >= 1.0:
 			_過渡中 = false
 
@@ -133,6 +145,9 @@ func apply_immediately() -> void:
 	res.atmospheric_density = preset["atmo"]
 	res.weather_evolution_speed = preset["evolve"]
 	res.cloud_type_bias = preset["type_bias"]
+	res.extra_large_noise_scale = preset["xl_scale"]
+	res.large_noise_scale = preset["lg_scale"]
+	res.medium_noise_scale = preset["md_scale"]
 	_過渡中 = false
 
 
@@ -235,6 +250,9 @@ func _開始過渡() -> void:
 	_起點濁度 = res.atmospheric_density
 	_起點演化速度 = res.weather_evolution_speed
 	_起點雲種偏置 = res.cloud_type_bias
+	_起點特大尺度 = res.extra_large_noise_scale
+	_起點大尺度 = res.large_noise_scale
+	_起點中尺度 = res.medium_noise_scale
 	_過渡計時 = 0.0
 	_過渡中 = true
 	# 進入暴風：第一道閃電等到過渡過半再打（天空夠陰才打雷，視覺不突兀）

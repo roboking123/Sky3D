@@ -15,12 +15,18 @@ enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM }
 ## 要驅動的 SSC2 雲驅動器（取它身上的 clouds_resource）
 @export var clouds_driver: SunshineCloudsDriverGD
 
-## 目前天氣型態：執行中改變就會開始平滑過渡
+## 目前天氣型態：執行中改變會平滑過渡；編輯器裡改變會立即套用（快速預覽）
 @export var 目前天氣: WeatherType = WeatherType.PARTLY_CLOUDY:
 	set(value):
 		if value == 目前天氣:
 			return
 		目前天氣 = value
+		# 編輯器：一次性立即套用方便預覽，不走每幀過渡（避免搶走 Inspector 調參權）。
+		# is_inside_tree 擋掉場景載入時的屬性還原，免得一開檔就改寫雲資源
+		if Engine.is_editor_hint():
+			if is_inside_tree():
+				apply_immediately()
+			return
 		_開始過渡()
 
 ## 過渡秒數：從目前狀態漸變到目標型態所需時間
@@ -80,7 +86,8 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
-	# 編輯器裡不動手，把參數控制權完整留給 Inspector
+	# 編輯器裡不跑每幀過渡／閃電／自動循環（避免搶 Inspector 調參權）；
+	# 下拉切換的即時預覽由「目前天氣」setter 一次性套用
 	if Engine.is_editor_hint():
 		return
 	var res: SunshineCloudsGD = _取得雲資源()

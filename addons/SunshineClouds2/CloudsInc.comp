@@ -301,6 +301,17 @@ struct GenericData{
 	float accumilation_decay;
 	float isAccumulationA;
     float resolutionscale;
+
+	// 進階散射參數（AAA 路徑）：>0.5 啟用多重散射 + 雙瓣相位 + 能量守恆權重
+	float advancedScattering;
+	float msOctaves;
+	float msAttenuation;
+	float msContribution;
+
+	float msEccentricityDecay;
+	float phaseSecondaryG;
+	float phaseLobeMix;
+	float emptySpaceSkip;
 };
 
 struct DirectionalLight {

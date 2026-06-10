@@ -104,6 +104,15 @@ float remap(float value, float min1, float max1, float min2, float max2) {
   return min2 + (value - min1) * (max2 - min2) / (max1 - min1);
 }
 
+// 安全 remap：分母趨近 0 時回傳 0（視為無雲），避免除零產生 NaN/Inf 像素閃爍
+float remapSafe(float value, float min1, float max1, float min2, float max2) {
+  float denom = max1 - min1;
+  if (abs(denom) < 1e-5) {
+    return 0.0;
+  }
+  return min2 + (value - min1) * (max2 - min2) / denom;
+}
+
 float BeersLaw (float dist, float absorption) {
   return exp(-dist * absorption);
 }
@@ -115,6 +124,15 @@ float Powder (float dist, float absorption) {
 float HenyeyGreenstein(float g, float costh)
 {
     return (1.0 - g * g) / (4.0 * PI * pow(1.0 + g * g - 2.0 * g * costh, 3.0/2.0));
+}
+
+// 等向相位值 1/(4PI)：進階路徑用來把光學深度校準到與舊路徑（相位乘進指數）同一量級
+#define ISOTROPIC_PHASE 0.07957747
+
+// 雙瓣 HG 相位：前向主瓣（銀邊）+ 後向次瓣（背光回散射），乘 4PI 正規化讓 g=0 時等於 1
+float DualLobeHG(float g_forward, float g_backward, float lobeMix, float costh)
+{
+    return mix(HenyeyGreenstein(g_forward, costh), HenyeyGreenstein(g_backward, costh), lobeMix) * 4.0 * PI;
 }
 
 bool renderBayer(ivec2 fragCoord, int framecount)
@@ -193,8 +211,8 @@ float sampleScene(
 	
 
 	float shape = mediumshape + max(effectorAdditive, 0.0);
-	shape = clamp(remap(shape, 1.0 - largeShape, 1.0, 0.0, 1.0), 0.0, 1.0);
-	shape = clamp(remap(shape, smallShape, 1.0, 0.0, 1.0), 0.0, 1.0);
+	shape = clamp(remapSafe(shape, 1.0 - largeShape, 1.0, 0.0, 1.0), 0.0, 1.0);
+	shape = clamp(remapSafe(shape, smallShape, 1.0, 0.0, 1.0), 0.0, 1.0);
 	shape += min(effectorAdditive, 0.0);
 
 	return clamp((shape * edgeFade), 0.0, 1.0);
@@ -227,7 +245,10 @@ float sampleSceneCoarse(
 	float largeShape = texture(large_noise, (worldPosition - largeNoisePos) / largenoisescale).r * extraLargeShape;
 	largeShape = smoothstep(coverage , coverage - 0.1, 1.0 - (largeShape * gradientSample.r)) + max(effectorAdditive, 0.0);
 
-	float shape = largeShape + effectorAdditive;
+	// 只取大形狀（含正向 effector），不加負向 effector：
+	// 數學上 largeShape == 0 時 sampleScene 必為 0（經 remapSafe 處理退化分母），
+	// 所以這個函數可以當「空步跳躍」的精準閘門，不會誤刪雲
+	float shape = largeShape;
 	return clamp((shape * edgeFade), 0.0, 1.0);
 }
 
@@ -695,11 +716,21 @@ void main() {
 		if (clamp(curPos.y, cloudfloor, cloudceiling) == curPos.y){
 
 			curLod = 1.0 - clamp(traveledDistance / lodMaxDistance, 0.0, 1.0);
-			// newdensity = sampleSceneCoarse(largeNoisePos, curPos, cloudceiling, cloudfloor, maskSample.a, largenoiseScale, coverage, curLod);
-			newdensity = pow(sampleScene(largeNoisePos, mediumNoisePos, smallNoisePos, curPos, cloudceiling, cloudfloor, maskSample.a, largenoiseScale, mediumnoiseScale, smallnoiseScale, coverage, smallNoiseMultiplier, curlPower, curLod, false) * densityMultiplier, sharpness) * depthFade;
-			// if (newdensity > 0.0) {
-			// 	newdensity = pow(sampleScene(largeNoisePos, mediumNoisePos, smallNoisePos, curPos, cloudceiling, cloudfloor, maskSample.a, largenoiseScale, mediumnoiseScale, smallnoiseScale, coverage, smallNoiseMultiplier, curlPower, curLod, false) * densityMultiplier, sharpness) * depthFade;
-			// }
+
+			// 空步跳躍：先用便宜的粗取樣（2 次貼圖讀取）當閘門，
+			// 大形狀為 0 的空域直接略過完整取樣（5~8 次貼圖讀取）。
+			// coverage 加 0.05 餘裕，補償完整取樣裡 curl 噪聲對採樣點的位移
+			bool skipFullSample = false;
+			if (genericData.data.emptySpaceSkip > 0.5){
+				skipFullSample = sampleSceneCoarse(largeNoisePos, curPos, cloudceiling, cloudfloor, maskSample.a, largenoiseScale, coverage + 0.05, curLod) <= 0.0;
+			}
+
+			if (skipFullSample){
+				newdensity = 0.0;
+			}
+			else{
+				newdensity = pow(sampleScene(largeNoisePos, mediumNoisePos, smallNoisePos, curPos, cloudceiling, cloudfloor, maskSample.a, largenoiseScale, mediumnoiseScale, smallnoiseScale, coverage, smallNoiseMultiplier, curlPower, curLod, false) * densityMultiplier, sharpness) * depthFade;
+			}
 			
 			
 			if (newdensity > 0.0){
@@ -711,17 +742,51 @@ void main() {
 
 				paintedColor += maskSample.rgb;
 				lightingSamples += 1.0;
+				// 前向遮蔽權重：視線上已累積的雲，遮蔽後方步進的入射光（由前往後能量守恆）
+				float occlusionWeight = 1.0 - clamp(density, 0.0, 1.0);
 				for (int lightI = 0; lightI < directionalLightCount; lightI++){
 					vec3 sundir = directionalLights[lightI].direction.xyz;
 					float sunUpWeight = directionalLightSunUpPower[lightI].r;
 
 					int thislightingStepCount = min(int(directionalLights[lightI].direction.w), lightingStepCount);
-					float henyeygreenstein =  pow(HenyeyGreenstein(genericData.data.anisotropy, directionalLightSunUpPower[lightI].b), mix(1.0, 2.0, 1.0 - genericData.data.anisotropy)); 
+					if (genericData.data.advancedScattering > 0.5){
+						// ===== 進階散射路徑（AAA）=====
+						// 多重散射八度近似（Wrenninge / Schneider）：
+						//   Σ b^i · exp(-τ·a^i) · Phase(g·c^i)
+						// 模擬厚雲內部多次彈射，讓向光的雲核發亮而不是死黑。
+						// 相位改為乘在散射能量上（物理正確），不再塞進 Beer 指數
+						float densitySample = sampleLighting(thislightingStepCount, curPos, extralargeNoisePos, largeNoisePos, mediumNoisePos, smallNoisePos, sundir, densityMultiplier * lightingdensityMultiplier, sunUpWeight, lightingStepDistance, cloudceiling, cloudfloor, extralargenoiseScale, largenoiseScale, mediumnoiseScale, smallnoiseScale, coverage, smallNoiseMultiplier, curlPower, curLod);
+						// 光學深度：乘 ISOTROPIC_PHASE 把量級校準到與舊路徑一致，lightingSharpness 沿用為消光倍率
+						float tau = densitySample * lightingStepDistance * max(lightingSharpness, 0.001) * ISOTROPIC_PHASE;
+
+						float scatterEnergy = 0.0;
+						float octaveExtinction = 1.0;
+						float octaveContribution = 1.0;
+						float octaveEccentricity = 1.0;
+						for (int octave = 0; octave < int(genericData.data.msOctaves); octave++){
+							float phase = DualLobeHG(genericData.data.anisotropy * octaveEccentricity, genericData.data.phaseSecondaryG * octaveEccentricity, genericData.data.phaseLobeMix, directionalLightSunUpPower[lightI].b);
+							scatterEnergy += octaveContribution * exp(-tau * octaveExtinction) * phase;
+							octaveExtinction *= genericData.data.msAttenuation;
+							octaveContribution *= genericData.data.msContribution;
+							octaveEccentricity *= genericData.data.msEccentricityDecay;
+						}
+
+						// Beer-Powder：向光薄處壓暗出「糖粉感」，clouds_powder = 0 時完全無效果
+						float powderBeer = mix(1.0, 1.0 - exp(-tau * 2.0), genericData.data.powderStrength);
+						float thisStepLightingWeight = scatterEnergy * sunUpWeight * occlusionWeight * powderBeer;
+
+						// 散射權重改為線性乘在光色外（gamma 校正只套在光色本身）
+						lightColor.rgb += pow(directionalLights[lightI].color.rgb * directionalLights[lightI].color.a, vec3(2.2)) * thisStepLightingWeight;
+						directionalLightSunUpPower[lightI].g += directionalLights[lightI].color.a * thisStepLightingWeight;
+						continue;
+					}
+
+					float henyeygreenstein =  pow(HenyeyGreenstein(genericData.data.anisotropy, directionalLightSunUpPower[lightI].b), mix(1.0, 2.0, 1.0 - genericData.data.anisotropy));
 					float densitySample = sampleLighting(thislightingStepCount, curPos, extralargeNoisePos, largeNoisePos, mediumNoisePos, smallNoisePos, sundir, densityMultiplier * lightingdensityMultiplier, sunUpWeight, lightingStepDistance, cloudceiling, cloudfloor, extralargenoiseScale, largenoiseScale, mediumnoiseScale, smallnoiseScale, coverage, smallNoiseMultiplier, curlPower, curLod);
 					densitySample = BeersLaw(lightingStepDistance, densitySample * henyeygreenstein);
 					//densitySample = Powder(lightingStepDistance, densitySample);
 					float thisStepLightingWeight = (pow(densitySample, lightingSharpness)) * sunUpWeight;
-					
+
 
 					lightColor.rgb += pow(directionalLights[lightI].color.rgb * directionalLights[lightI].color.a * thisStepLightingWeight, vec3(2.2)) * powderEffect;
 					directionalLightSunUpPower[lightI].g += directionalLights[lightI].color.a * thisStepLightingWeight;

@@ -69,10 +69,30 @@ class_name SunshineCloudsGD
 @export_subgroup("Reflections")
 @export var reflections_globalshaderparam : String = ""
 
+## 進階散射（AAA 路徑）：多重散射八度 + 雙瓣相位 + 由前往後遮蔽權重 + Beer-Powder。
+## 開啟後光照模型改變，建議重調 lighting_density / lighting_sharpness / clouds_powder
+@export_subgroup("Scattering")
+@export var use_advanced_scattering : bool = false
+## 多重散射八度數：1 = 單次散射，3 = 標準 AAA 配置（向光雲核明顯變亮）
+@export_range(1, 4) var multi_scatter_octaves : int = 3
+## 每升一個八度，消光（遮蔽）衰減的倍率 a
+@export_range(0, 1) var multi_scatter_attenuation : float = 0.5
+## 每升一個八度，散射能量貢獻的倍率 b
+@export_range(0, 1) var multi_scatter_contribution : float = 0.5
+## 每升一個八度，相位各向異性的衰減倍率 c（高八度趨向等向散射）
+@export_range(0, 1) var multi_scatter_eccentricity_decay : float = 0.5
+## 後向散射瓣 g 值（負值 = 背對太陽方向的回散射，撐亮背光面）
+@export_range(-1, 0) var phase_secondary_anisotropy : float = -0.15
+## 前向瓣與後向瓣的混合比例：0 = 純前向（只有銀邊），0.25 = 標準
+@export_range(0, 1) var phase_lobe_mix : float = 0.25
+
 @export_subgroup("Performance")
 @export var min_step_distance : float = 400.0
 @export var max_step_distance : float = 500.0
 @export var lighting_travel_distance : float = 10000.0
+## 空步跳躍：空域先用便宜的粗取樣當閘門再決定要不要做完整取樣（晴朗天空大幅省採樣）。
+## 若雲頂出現邊緣裁切就關掉
+@export var empty_space_skip : bool = false
 
 @export_subgroup("Mask")
 @export var extra_large_used_as_mask : bool = false
@@ -500,7 +520,7 @@ func _render_callback(effect_callback_type, render_data):
 					#reflections
 					accumulation_textures.append(rd.texture_create(base_colorformat, RDTextureView.new(), [blankImageData]))
 					
-					general_data_buffer = rd.uniform_buffer_create(256)
+					general_data_buffer = rd.uniform_buffer_create(288)
 					
 					var depthformat : RDTextureFormat = rd.texture_get_format(depth_image)
 					depthformat.width = new_size.x
@@ -839,8 +859,8 @@ func retrieve_position_queries(data : PackedByteArray):
 			#self.effect_callback_type = CompositorEffect.EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
 
 func update_matrices(camera_tr, view_proj, new_size: Vector2i):
-	if general_data.size() != 256: #64 * 4 bytes for each float = 256.
-		general_data.resize(256)
+	if general_data.size() != 288: #72 * 4 bytes for each float = 288.
+		general_data.resize(288)
 	
 	var idx = 0
 	filter_index += 1
@@ -1034,6 +1054,17 @@ func update_matrices(camera_tr, view_proj, new_size: Vector2i):
 		general_data.encode_float(idx, 0.0); idx += 4
 	
 	general_data.encode_float(idx, int(pow(2.0, float(resolution_scale)))); idx += 4
+
+	# 進階散射參數（對應 CloudsInc.comp GenericData 尾端 8 個 float）
+	general_data.encode_float(idx, 1.0 if use_advanced_scattering else 0.0); idx += 4
+	general_data.encode_float(idx, float(multi_scatter_octaves)); idx += 4
+	general_data.encode_float(idx, multi_scatter_attenuation); idx += 4
+	general_data.encode_float(idx, multi_scatter_contribution); idx += 4
+
+	general_data.encode_float(idx, multi_scatter_eccentricity_decay); idx += 4
+	general_data.encode_float(idx, phase_secondary_anisotropy); idx += 4
+	general_data.encode_float(idx, phase_lobe_mix); idx += 4
+	general_data.encode_float(idx, 1.0 if empty_space_skip else 0.0); idx += 4
 	#
 	#general_data.encode_float(idx, last_size.x); idx += 4
 	#general_data.encode_float(idx, last_size.y); idx += 4

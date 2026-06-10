@@ -1101,14 +1101,9 @@ func update_matrices(camera_tr, view_proj, new_size: Vector2i):
 	var prev_camera_tr : Transform3D = last_camera_tr if has_last_matrices else camera_tr
 	var prev_proj : Projection = last_proj if has_last_matrices else view_proj
 	idx = encode_transform_as_mat4(idx, prev_camera_tr.affine_inverse())
-	# RD 場景 UBO 的投影含 Vulkan Y 翻轉校正（NDC Y 朝下），get_cam_projection() 是未校正的原始投影；
-	# 自建重投影必須同樣翻轉 Y 列，輸出座標才跟當前幀的 y 朝下螢幕 UV 一致
-	var prev_proj_flipped : Projection = prev_proj
-	var flip_col_x : Vector4 = prev_proj_flipped.x; flip_col_x.y = -flip_col_x.y; prev_proj_flipped.x = flip_col_x
-	var flip_col_y : Vector4 = prev_proj_flipped.y; flip_col_y.y = -flip_col_y.y; prev_proj_flipped.y = flip_col_y
-	var flip_col_z : Vector4 = prev_proj_flipped.z; flip_col_z.y = -flip_col_z.y; prev_proj_flipped.z = flip_col_z
-	var flip_col_w : Vector4 = prev_proj_flipped.w; flip_col_w.y = -flip_col_w.y; prev_proj_flipped.w = flip_col_w
-	idx = encode_projection_as_mat4(idx, prev_proj_flipped)
+	# 實測 get_cam_projection() 的 NDC 慣例與當前幀螢幕 UV 一致，直接編碼、不做 Y 翻轉
+	# （加翻轉會讓垂直方向的重投影反向，鏡頭上下轉動時歷史幀往反方向跑）
+	idx = encode_projection_as_mat4(idx, prev_proj)
 	general_data.encode_float(idx, prev_camera_tr.origin.x); idx += 4
 	general_data.encode_float(idx, prev_camera_tr.origin.y); idx += 4
 	general_data.encode_float(idx, prev_camera_tr.origin.z); idx += 4

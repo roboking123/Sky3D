@@ -65,14 +65,15 @@ enum WeatherType { CLEAR, PARTLY_CLOUDY, OVERCAST, STORM, CIRROCUMULUS, SCATTERE
 # 魚鱗雲 0.84 / 散積雲 0.76 由 CPU 離線重現 shader 數學掃描而得（存在率約 62% / 28%）。
 # TODO（未來項目）：根治＝shader 端鏈式 remap 把 coverage 線性化（Schneider 慣例）；
 # 會位移所有既有視覺、四種天氣基準需整批重調，動工前先凍結一份現役視覺快照
-# floor_m / ceiling_m：雲層底/頂高度（公尺）。既有四型固定 demo 基準（1500/16000）。
-# 魚鱗雲＝高雲族（卷積雲 5~12km）抬到 6000~14000；散積雲＝低雲族，頂壓到 9000
+# floor_m / ceiling_m：雲層底/頂高度（公尺）。多雲＝使用者基準、暴風/雨天需高層給雲塔，維持 1500/16000。
+# 陰天＝低雲毯壓到 8000 頂（與多雲拉開差距）；魚鱗雲＝高雲族（卷積雲 5~12km）抬到 6000~14000；散積雲＝低雲族，頂壓到 9000。
+# 魚鱗雲 evolve 壓極低 + md_scale 取 12000：高空卷積雲穩定少變形，並降低時域閃爍的高頻侵蝕源
 const PRESETS: Dictionary = {
 	WeatherType.CLEAR:             {"coverage": 0.60, "density": 0.10, "atmo": 0.25, "evolve": 0.002, "type_bias": -0.4, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
 	WeatherType.PARTLY_CLOUDY:     {"coverage": 0.874, "density": 0.14, "atmo": 0.503, "evolve": 0.004, "type_bias": 0.0, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
-	WeatherType.OVERCAST:          {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
+	WeatherType.OVERCAST:          {"coverage": 0.96, "density": 0.30, "atmo": 0.65, "evolve": 0.006, "type_bias": -0.6, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 8000.0},
 	WeatherType.STORM:             {"coverage": 1.0, "density": 0.70, "atmo": 0.90, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
-	WeatherType.CIRROCUMULUS:      {"coverage": 0.84, "density": 0.10, "atmo": 0.30, "evolve": 0.003, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 20000.0, "md_scale": 9000.0, "floor_m": 6000.0, "ceiling_m": 14000.0},
+	WeatherType.CIRROCUMULUS:      {"coverage": 0.84, "density": 0.10, "atmo": 0.30, "evolve": 0.0005, "type_bias": -0.5, "xl_scale": 100000.0, "lg_scale": 20000.0, "md_scale": 12000.0, "floor_m": 6000.0, "ceiling_m": 14000.0},
 	WeatherType.SCATTERED_CUMULUS: {"coverage": 0.76, "density": 0.30, "atmo": 0.35, "evolve": 0.003, "type_bias": 0.45, "xl_scale": 140000.0, "lg_scale": 70000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 9000.0},
 	WeatherType.RAIN:              {"coverage": 1.0, "density": 1.60, "atmo": 1.10, "evolve": 0.012, "type_bias": 0.7, "xl_scale": 100000.0, "lg_scale": 60000.0, "md_scale": 20000.0, "floor_m": 1500.0, "ceiling_m": 16000.0},
 }

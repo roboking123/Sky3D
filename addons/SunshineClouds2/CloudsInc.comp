@@ -332,8 +332,8 @@ struct GenericData{
 
 	float nearFlightRefinement;		// 穿雲近場步進細化（0 = 關）
 	float neighborhoodClampStrength;	// 鄰域夾取強度（TAA 式 AABB；0 = 關，位元級不變）
-	float reservedB;
-	float reservedC;
+	float ditherStratification;		// 分層化時域抖動開關（>0.5 = 開；0 = 舊時間滾動藍噪聲）
+	float ditherFrameIndex;			// 抖動幀計數（GD 端每幀遞增，0~4095 循環）
 
 	// 自建上一幀相機資料（GD 端每幀上傳）：
 	// 重投影不再依賴 scene_data 的 prev_data——它在部分版本/路徑不會確實填入，

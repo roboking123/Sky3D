@@ -312,6 +312,24 @@ struct GenericData{
 	float phaseSecondaryG;
 	float phaseLobeMix;
 	float emptySpaceSkip;
+
+	// 第二批進階參數：能量守恆積分、錐形打光、打光重用、天氣演化
+	float scatterEnergyGain;
+	float lightConeSpread;
+	float lightSampleReuse;
+	float energyConserving;
+
+	float weatherEvolvePhase;
+	float reservedA;
+	float reservedB;
+	float reservedC;
+
+	// 自建上一幀相機資料（GD 端每幀上傳）：
+	// 重投影不再依賴 scene_data 的 prev_data——它在部分版本/路徑不會確實填入，
+	// 導致歷史幀貼著螢幕跑（鏡頭一轉雲就破碎拖影）
+	mat4 prevViewMatrix;
+	mat4 prevProjectionMatrix;
+	vec4 prevCameraOrigin; // xyz = 上一幀相機世界座標原點
 };
 
 struct DirectionalLight {

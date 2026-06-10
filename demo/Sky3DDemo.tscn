@@ -239,6 +239,7 @@ needs_normal_roughness = false
 script = ExtResource("10_ssc2c")
 clouds_coverage = 0.862
 atmospheric_density = 0.4
+use_advanced_scattering = true
 cloud_ambient_color = Color(0.761, 0.784, 0.824, 1)
 cloud_ambient_tint = Color(0.58, 0.6, 0.62, 1)
 ambient_occlusion_color = Color(0.45, 0.47, 0.52, 1)

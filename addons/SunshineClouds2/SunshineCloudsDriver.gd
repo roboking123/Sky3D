@@ -88,6 +88,9 @@ func _ready():
 func _process(delta : float):
 	if clouds_resource != null:
 		clouds_resource.current_time = wrap(clouds_resource.current_time + delta * clouds_resource.dither_speed, 0.0, clouds_resource.dither_speed * 64.0)
+		# 天氣圖演化相位：持續累積不回繞（float 精度撐到數天無虞，回繞反而會跳圖）
+		if clouds_resource.weather_evolution_speed > 0.0:
+			clouds_resource.weather_evolution_phase += delta * clouds_resource.weather_evolution_speed
 		
 		if update_continuously:
 			_updating_settings = false

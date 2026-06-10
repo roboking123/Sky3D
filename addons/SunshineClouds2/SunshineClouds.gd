@@ -85,6 +85,19 @@ class_name SunshineCloudsGD
 @export_range(-1, 0) var phase_secondary_anisotropy : float = -0.15
 ## 前向瓣與後向瓣的混合比例：0 = 純前向（只有銀邊），0.25 = 標準
 @export_range(0, 1) var phase_lobe_mix : float = 0.25
+## 能量守恆積分：散射貢獻按步進不透明度加權並於收尾正規化，亮度不再隨步數膨脹。
+## 開啟後整體變暗屬正常，用 scatter_energy_gain 補增益
+@export var energy_conserving_integration : bool = false
+## 能量守恆積分的散射增益（僅該模式生效）
+@export_range(0, 10) var scatter_energy_gain : float = 1.0
+## 錐形打光：打光行進在光線方向周圍張開的錐形比例（0 = 直線；0.1~0.2 自遮蔽更準、陰影更柔）
+@export_range(0, 0.5) var lighting_cone_spread : float = 0.0
+## 打光重用：步距夠近且密度相近時重用上一步的打光結果（約省一半打光成本，僅進階散射路徑生效）
+@export var lighting_sample_reuse : bool = false
+
+@export_subgroup("Weather")
+## 天氣圖演化速度（相位/秒）：>0 時覆蓋圖案會隨時間無縫變形重組（不只隨風平移）。建議 0.002~0.02
+@export_range(0, 0.1, 0.001) var weather_evolution_speed : float = 0.0
 
 @export_subgroup("Performance")
 @export var min_step_distance : float = 400.0
@@ -112,6 +125,12 @@ var large_scale_clouds_position : Vector3 = Vector3.ZERO
 var medium_scale_clouds_position : Vector3 = Vector3.ZERO
 var detail_clouds_position : Vector3 = Vector3.ZERO
 var current_time : float = 0.0
+# 天氣圖演化相位（由 Driver 每幀推進）
+var weather_evolution_phase : float = 0.0
+# 上一幀相機資料（自建重投影用，修鏡頭旋轉時雲拖影破碎）
+var last_camera_tr : Transform3D = Transform3D.IDENTITY
+var last_proj : Projection = Projection()
+var has_last_matrices : bool = false
 
 @export_subgroup("Lights")
 @export var directional_lights_data : Array[Vector4] = []
@@ -520,7 +539,7 @@ func _render_callback(effect_callback_type, render_data):
 					#reflections
 					accumulation_textures.append(rd.texture_create(base_colorformat, RDTextureView.new(), [blankImageData]))
 					
-					general_data_buffer = rd.uniform_buffer_create(288)
+					general_data_buffer = rd.uniform_buffer_create(464)
 					
 					var depthformat : RDTextureFormat = rd.texture_get_format(depth_image)
 					depthformat.width = new_size.x
@@ -859,8 +878,8 @@ func retrieve_position_queries(data : PackedByteArray):
 			#self.effect_callback_type = CompositorEffect.EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
 
 func update_matrices(camera_tr, view_proj, new_size: Vector2i):
-	if general_data.size() != 288: #72 * 4 bytes for each float = 288.
-		general_data.resize(288)
+	if general_data.size() != 464: #116 * 4 bytes for each float = 464（含 2 個 mat4 + 1 個 vec4 的上一幀相機資料）.
+		general_data.resize(464)
 	
 	var idx = 0
 	filter_index += 1
@@ -1065,15 +1084,76 @@ func update_matrices(camera_tr, view_proj, new_size: Vector2i):
 	general_data.encode_float(idx, phase_secondary_anisotropy); idx += 4
 	general_data.encode_float(idx, phase_lobe_mix); idx += 4
 	general_data.encode_float(idx, 1.0 if empty_space_skip else 0.0); idx += 4
-	#
-	#general_data.encode_float(idx, last_size.x); idx += 4
-	#general_data.encode_float(idx, last_size.y); idx += 4
-	#general_data.encode_float(idx, 0.0); idx += 4
-	#general_data.encode_float(idx, 0.0); idx += 4
+
+	# 第二批進階參數：能量守恆積分、錐形打光、打光重用、天氣演化
+	general_data.encode_float(idx, scatter_energy_gain); idx += 4
+	general_data.encode_float(idx, lighting_cone_spread); idx += 4
+	general_data.encode_float(idx, 1.0 if lighting_sample_reuse else 0.0); idx += 4
+	general_data.encode_float(idx, 1.0 if energy_conserving_integration else 0.0); idx += 4
+
+	general_data.encode_float(idx, weather_evolution_phase); idx += 4
+	general_data.encode_float(idx, 0.0); idx += 4 # reservedA
+	general_data.encode_float(idx, 0.0); idx += 4 # reservedB
+	general_data.encode_float(idx, 0.0); idx += 4 # reservedC
+
+	# 上一幀相機資料（自建重投影：scene_data 的 prev_data 不可靠，
+	# 會讓歷史幀貼著螢幕跑——鏡頭一轉雲就破碎拖影）
+	var prev_camera_tr : Transform3D = last_camera_tr if has_last_matrices else camera_tr
+	var prev_proj : Projection = last_proj if has_last_matrices else view_proj
+	idx = encode_transform_as_mat4(idx, prev_camera_tr.affine_inverse())
+	# RD 場景 UBO 的投影含 Vulkan Y 翻轉校正（NDC Y 朝下），get_cam_projection() 是未校正的原始投影；
+	# 自建重投影必須同樣翻轉 Y 列，輸出座標才跟當前幀的 y 朝下螢幕 UV 一致
+	var prev_proj_flipped : Projection = prev_proj
+	var flip_col_x : Vector4 = prev_proj_flipped.x; flip_col_x.y = -flip_col_x.y; prev_proj_flipped.x = flip_col_x
+	var flip_col_y : Vector4 = prev_proj_flipped.y; flip_col_y.y = -flip_col_y.y; prev_proj_flipped.y = flip_col_y
+	var flip_col_z : Vector4 = prev_proj_flipped.z; flip_col_z.y = -flip_col_z.y; prev_proj_flipped.z = flip_col_z
+	var flip_col_w : Vector4 = prev_proj_flipped.w; flip_col_w.y = -flip_col_w.y; prev_proj_flipped.w = flip_col_w
+	idx = encode_projection_as_mat4(idx, prev_proj_flipped)
+	general_data.encode_float(idx, prev_camera_tr.origin.x); idx += 4
+	general_data.encode_float(idx, prev_camera_tr.origin.y); idx += 4
+	general_data.encode_float(idx, prev_camera_tr.origin.z); idx += 4
+	general_data.encode_float(idx, 1.0); idx += 4
+
+	last_camera_tr = camera_tr
+	last_proj = view_proj
+	has_last_matrices = true
 	
 	# Copy to byte buffer
 	rd.buffer_update(general_data_buffer, 0, general_data.size(), general_data)
 
+
+# 以 std140 column-major 把 Transform3D 寫入 general_data 當 mat4（仿射，最後一列 0,0,0,1）
+func encode_transform_as_mat4(offset : int, tr : Transform3D) -> int:
+	general_data.encode_float(offset, tr.basis.x.x); offset += 4
+	general_data.encode_float(offset, tr.basis.x.y); offset += 4
+	general_data.encode_float(offset, tr.basis.x.z); offset += 4
+	general_data.encode_float(offset, 0.0); offset += 4
+
+	general_data.encode_float(offset, tr.basis.y.x); offset += 4
+	general_data.encode_float(offset, tr.basis.y.y); offset += 4
+	general_data.encode_float(offset, tr.basis.y.z); offset += 4
+	general_data.encode_float(offset, 0.0); offset += 4
+
+	general_data.encode_float(offset, tr.basis.z.x); offset += 4
+	general_data.encode_float(offset, tr.basis.z.y); offset += 4
+	general_data.encode_float(offset, tr.basis.z.z); offset += 4
+	general_data.encode_float(offset, 0.0); offset += 4
+
+	general_data.encode_float(offset, tr.origin.x); offset += 4
+	general_data.encode_float(offset, tr.origin.y); offset += 4
+	general_data.encode_float(offset, tr.origin.z); offset += 4
+	general_data.encode_float(offset, 1.0); offset += 4
+	return offset
+
+# 以 std140 column-major 把 Projection 寫入 general_data 當 mat4
+func encode_projection_as_mat4(offset : int, proj : Projection) -> int:
+	var columns : Array[Vector4] = [proj.x, proj.y, proj.z, proj.w]
+	for column : Vector4 in columns:
+		general_data.encode_float(offset, column.x); offset += 4
+		general_data.encode_float(offset, column.y); offset += 4
+		general_data.encode_float(offset, column.z); offset += 4
+		general_data.encode_float(offset, column.w); offset += 4
+	return offset
 
 func update_lights():
 	lights_updated = false

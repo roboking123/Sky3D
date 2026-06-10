@@ -27,8 +27,19 @@ class_name CloudSkyAmbientSync
 ## 最低亮度：避免夜晚雲底全黑、看不見輪廓（取顏色的明度 v 下限）
 @export_range(0.0, 1.0) var 最低亮度: float = 0.12
 
+## 大氣色來源（指向 Sky3D 的 SkyDome 節點，用它的日／昏／夜色調算地平線色）
+@export var sky_dome: SkyDome
+
+## 大氣連動強度：把 Sky3D 地平線色餵給雲的大氣散射色（atmosphere_color），
+## 讓遠景雲霧跟天空同一套色調。0 = 不連動（維持雲自身固定大氣色）
+@export_range(0.0, 1.0) var 大氣連動強度: float = 0.0
+
+## 大氣色調：在算出的地平線色之上再乘一層微調
+@export var 大氣色調: Color = Color(1.0, 1.0, 1.0, 1.0)
+
 # 第一次執行時記下雲資源原本的固定底色，當作連動強度<1 時的混合基準
 var _原始雲底色: Color = Color(0.761, 0.784, 0.824, 1.0)
+var _原始大氣色: Color = Color(1.0, 1.0, 1.0, 1.0)
 var _已快取原始色: bool = false
 
 
@@ -46,6 +57,7 @@ func _process(_delta: float) -> void:
 
 	if not _已快取原始色:
 		_原始雲底色 = res.cloud_ambient_color
+		_原始大氣色 = res.atmosphere_color
 		_已快取原始色 = true
 
 	# 取當前天空環境色，乘上色調乘數
@@ -56,3 +68,25 @@ func _process(_delta: float) -> void:
 	var 結果: Color = _原始雲底色.lerp(天空色, 連動強度)
 	結果.a = 1.0
 	res.cloud_ambient_color = 結果
+
+	# 大氣色連動：用 SkyDome 的日／昏／夜色調近似當前地平線色，
+	# 餵給雲的大氣散射色，讓遠景雲霧與 Sky3D 天空同一套色調
+	if 大氣連動強度 > 0.0 and sky_dome != null:
+		var 太陽高度: float = 0.0
+		if clouds_driver.tracked_directional_lights.size() > 0 \
+		and clouds_driver.tracked_directional_lights[0] != null:
+			# basis.z 指向太陽，y 分量即太陽仰角 sin 值
+			太陽高度 = clouds_driver.tracked_directional_lights[0].global_transform.basis.z.y
+
+		var 白天權重: float = smoothstep(-0.05, 0.25, 太陽高度)
+		# 黃昏權重：太陽貼近地平線時最強的鐘形權重
+		var 黃昏權重: float = clampf(1.0 - absf(太陽高度) / 0.18, 0.0, 1.0)
+
+		var 夜空色: Color = sky_dome.atm_night_tint
+		var 地平線色: Color = 夜空色.lerp(sky_dome.atm_day_tint, 白天權重)
+		地平線色 = 地平線色.lerp(sky_dome.atm_horizon_light_tint, 黃昏權重 * 0.7)
+		地平線色 = 地平線色 * 大氣色調
+
+		var 大氣結果: Color = _原始大氣色.lerp(地平線色, 大氣連動強度)
+		大氣結果.a = _原始大氣色.a
+		res.atmosphere_color = 大氣結果

@@ -135,6 +135,34 @@ float DualLobeHG(float g_forward, float g_backward, float lobeMix, float costh)
     return mix(HenyeyGreenstein(g_forward, costh), HenyeyGreenstein(g_backward, costh), lobeMix) * 4.0 * PI;
 }
 
+// 錐形打光取樣核（Schneider 風格）：6 個固定單位偏移，
+// 打光行進時在太陽方向周圍張開錐形採樣，自遮蔽更準、陰影更柔
+const vec3 CONE_KERNEL[6] = vec3[6](
+	vec3( 0.38051305,  0.92453449, -0.02111345),
+	vec3(-0.50625799, -0.03590792, -0.86163418),
+	vec3(-0.32509218, -0.94557439,  0.01428793),
+	vec3( 0.09026238, -0.27376545,  0.95755165),
+	vec3( 0.28128598,  0.42443639, -0.86065785),
+	vec3(-0.16852403,  0.14748697,  0.97460106));
+
+// 天氣圖演化用的 2D 雜湊：相位整數段映射到隨機 UV 偏移
+vec2 weatherHash(float n) {
+	return fract(sin(vec2(n * 12.9898, n * 78.233)) * 43758.5453) - 0.5;
+}
+
+// 天氣圖動態演化取樣：雙層交叉淡化，各層都在自己權重歸零的瞬間跳到新偏移，
+// 所以覆蓋圖案會隨相位無縫變形重組（不只平移）。相位 <= 0 時退回單張取樣（位元級不變）
+vec4 sampleWeatherMap(vec2 uv) {
+	float phase = genericData.data.weatherEvolvePhase;
+	if (phase <= 0.0) {
+		return texture(extra_large_noise, uv);
+	}
+	float weightA = abs(fract(phase) * 2.0 - 1.0);
+	vec4 sampleA = texture(extra_large_noise, uv + weatherHash(floor(phase + 0.5)));
+	vec4 sampleB = texture(extra_large_noise, uv + weatherHash(floor(phase) + 777.77));
+	return mix(sampleB, sampleA, weightA);
+}
+
 bool renderBayer(ivec2 fragCoord, int framecount)
 {
 	//int BAYER = 16;
@@ -287,15 +315,20 @@ float sampleLighting(
 	float thisDensity = 0.0;
 	float count = 0.0;
 	vec3 curPos = worldPosition;
+	float coneSpread = genericData.data.lightConeSpread;
 	for (float i = 0.0; i < stepCountFloat; i++) {
 		traveledDistance = mix(eachShortStep, actualDistance, clamp(quadraticOut(i / stepCountFloat), 0.0, 1.0));
 		curPos = worldPosition + sunDirection * traveledDistance;
+		// 錐形取樣：沿太陽方向張開錐形抖動採樣點（0 = 維持直線行進）
+		if (coneSpread > 0.0){
+			curPos += CONE_KERNEL[int(mod(i, 6.0))] * traveledDistance * coneSpread;
+		}
 
 		if (density < 1.0 && clamp(curPos.y, cloudfloor, cloudceiling) == curPos.y){
 			heightGradient = remap(curPos.y, cloudfloor, cloudceiling, 0.0, 1.0);
-			
+
 			heightGradient = clamp(smoothstep(sunUpValue - 0.1, sunUpValue, heightGradient), 0.0, 1.0);
-			float extraLargeShape = texture(extra_large_noise, (curPos.xz - extralargeNoisePos.xz) / extralargenoisescale).a;
+			float extraLargeShape = sampleWeatherMap((curPos.xz - extralargeNoisePos.xz) / extralargenoisescale).a;
 
 			thisDensity = sampleScene(largeNoisePos, mediumNoisePos, smallNoisePos, curPos, cloudceiling, cloudfloor, extraLargeShape, largenoisescale, mediumnoisescale, smallnoisescale, coverage, smallscalePower, curlPower, lod, true) * densityMultiplier * eachStepWeight;
 			// if (thisDensity <= 0.0){
@@ -335,7 +368,7 @@ float sampleAO(
 	samplePos.x += lightingSampleRange * (rand(samplePos.zy) * 2.0 - 1.0);
 	samplePos.z += lightingSampleRange * (rand(samplePos.yx) * 2.0 - 1.0);
 
-	float extraLargeShape = texture(extra_large_noise, (samplePos.xz - extralargeNoisePos.xz) / extralargenoisescale).a;
+	float extraLargeShape = sampleWeatherMap((samplePos.xz - extralargeNoisePos.xz) / extralargenoisescale).a;
 	return sampleScene(largeNoisePos, mediumNoisePos, smallNoisePos, samplePos, cloudceiling, cloudfloor, extraLargeShape, largenoisescale, mediumnoisescale, smallnoisescale, coverage, smallscalePower, curlPower, lod, true);
 }
 
@@ -687,10 +720,15 @@ void main() {
 	float curLod = 1.0;
 	float samplePosCount = genericData.data.samplePointsCount;
 
+	// 打光重用快取：上一個有雲採樣點算好的光學深度（每盞平行光一格）
+	float cachedLightTau[4] = float[4](0.0, 0.0, 0.0, 0.0);
+	float lastLightSampleDistance = -1e9;
+	float lastLightSampleDensity = -1.0;
+
 	if (samplePosCount > 0 && uv == ivec2(0)){
 		for (int i = 0; i < samplePosCount; i++){
 			curPos = SamplePoints[i].xyz;
-			vec4 maskSample = texture(extra_large_noise, (curPos.xz - extralargeNoisePos.xz) / extralargenoiseScale);
+			vec4 maskSample = sampleWeatherMap((curPos.xz - extralargeNoisePos.xz) / extralargenoiseScale);
 			//ceilingSample = mix(halfCeiling, cloudceiling, maskSample.a);
 			//ceilingSample = cloudceiling;
 			
@@ -707,7 +745,7 @@ void main() {
 		
 		curPos = rayOrigin + raydirection * traveledDistance;
 		
-		vec4 maskSample = texture(extra_large_noise, (curPos.xz - extralargeNoisePos.xz) / extralargenoiseScale);
+		vec4 maskSample = sampleWeatherMap((curPos.xz - extralargeNoisePos.xz) / extralargenoiseScale);
 		//ceilingSample = mix(halfCeiling, cloudceiling, maskSample.a);
 		//ceilingSample = cloudceiling;
 		
@@ -744,6 +782,15 @@ void main() {
 				lightingSamples += 1.0;
 				// 前向遮蔽權重：視線上已累積的雲，遮蔽後方步進的入射光（由前往後能量守恆）
 				float occlusionWeight = 1.0 - clamp(density, 0.0, 1.0);
+				// 能量守恆積分：散射貢獻按本步不透明度加權，總亮度與步數脫鉤（增益旋鈕補償量級）
+				float integrationWeight = 1.0;
+				if (genericData.data.energyConserving > 0.5){
+					integrationWeight = clamp(newdensity, 0.0, 1.0) * genericData.data.scatterEnergyGain;
+				}
+				// 打光重用：與上一個打光點距離夠近且密度相近時，直接重用快取的光學深度（約省一半打光成本）
+				bool reuseLighting = genericData.data.lightSampleReuse > 0.5
+					&& (traveledDistance - lastLightSampleDistance) < minstep * 2.0
+					&& abs(newdensity - lastLightSampleDensity) < 0.1;
 				for (int lightI = 0; lightI < directionalLightCount; lightI++){
 					vec3 sundir = directionalLights[lightI].direction.xyz;
 					float sunUpWeight = directionalLightSunUpPower[lightI].r;
@@ -755,9 +802,16 @@ void main() {
 						//   Σ b^i · exp(-τ·a^i) · Phase(g·c^i)
 						// 模擬厚雲內部多次彈射，讓向光的雲核發亮而不是死黑。
 						// 相位改為乘在散射能量上（物理正確），不再塞進 Beer 指數
-						float densitySample = sampleLighting(thislightingStepCount, curPos, extralargeNoisePos, largeNoisePos, mediumNoisePos, smallNoisePos, sundir, densityMultiplier * lightingdensityMultiplier, sunUpWeight, lightingStepDistance, cloudceiling, cloudfloor, extralargenoiseScale, largenoiseScale, mediumnoiseScale, smallnoiseScale, coverage, smallNoiseMultiplier, curlPower, curLod);
-						// 光學深度：乘 ISOTROPIC_PHASE 把量級校準到與舊路徑一致，lightingSharpness 沿用為消光倍率
-						float tau = densitySample * lightingStepDistance * max(lightingSharpness, 0.001) * ISOTROPIC_PHASE;
+						float tau = 0.0;
+						if (reuseLighting){
+							tau = cachedLightTau[lightI];
+						}
+						else{
+							float densitySample = sampleLighting(thislightingStepCount, curPos, extralargeNoisePos, largeNoisePos, mediumNoisePos, smallNoisePos, sundir, densityMultiplier * lightingdensityMultiplier, sunUpWeight, lightingStepDistance, cloudceiling, cloudfloor, extralargenoiseScale, largenoiseScale, mediumnoiseScale, smallnoiseScale, coverage, smallNoiseMultiplier, curlPower, curLod);
+							// 光學深度：乘 ISOTROPIC_PHASE 把量級校準到與舊路徑一致，lightingSharpness 沿用為消光倍率
+							tau = densitySample * lightingStepDistance * max(lightingSharpness, 0.001) * ISOTROPIC_PHASE;
+							cachedLightTau[lightI] = tau;
+						}
 
 						float scatterEnergy = 0.0;
 						float octaveExtinction = 1.0;
@@ -773,7 +827,7 @@ void main() {
 
 						// Beer-Powder：向光薄處壓暗出「糖粉感」，clouds_powder = 0 時完全無效果
 						float powderBeer = mix(1.0, 1.0 - exp(-tau * 2.0), genericData.data.powderStrength);
-						float thisStepLightingWeight = scatterEnergy * sunUpWeight * occlusionWeight * powderBeer;
+						float thisStepLightingWeight = scatterEnergy * sunUpWeight * occlusionWeight * powderBeer * integrationWeight;
 
 						// 散射權重改為線性乘在光色外（gamma 校正只套在光色本身）
 						lightColor.rgb += pow(directionalLights[lightI].color.rgb * directionalLights[lightI].color.a, vec3(2.2)) * thisStepLightingWeight;
@@ -831,6 +885,12 @@ void main() {
 					// }
 				}
 
+				// 重用追蹤：這一步有實算打光就更新快取基準點
+				if (!reuseLighting){
+					lastLightSampleDistance = traveledDistance;
+					lastLightSampleDensity = newdensity;
+				}
+
 				for (int lightI = 0; lightI < pointLightCount; lightI++){
 					vec3 lightToOriginDelta = pointLights[lightI].position.xyz - curPos;
 					float lightDistanceWeight = length(lightToOriginDelta); 
@@ -845,6 +905,10 @@ void main() {
 						lightDistanceWeight = lightDistanceWeight / pointLights[lightI].position.w;
 						lightDistanceWeight = pointLights[lightI].color.a * pow((1.0 - lightDistanceWeight), 2.2) * densitySample;
 
+						// 進階路徑：點光也吃前向遮蔽與能量守恆權重
+						if (genericData.data.advancedScattering > 0.5){
+							lightDistanceWeight *= occlusionWeight * integrationWeight;
+						}
 
 						lightColor.rgb += pow(pointLights[lightI].color.rgb * lightDistanceWeight, vec3(2.2));
 					}
@@ -895,6 +959,12 @@ void main() {
 		
 	}
 
+	// 能量守恆：把預乘 alpha 的散射輻射除回去，後段合成的 mix(螢幕色, 雲色, alpha)
+	// 就等於正確的前向合成（screen·(1-A) + L_premult）
+	if (genericData.data.advancedScattering > 0.5 && genericData.data.energyConserving > 0.5){
+		lightColor.rgb /= max(density, 0.05);
+	}
+
 	density *= clamp(smoothstep(maxstep * stepCount, minstep * stepCount, traveledDistance), 0.0, 1.0);
 
 	ambient = clamp(ambient / lightingSamples, 0.0, 1.0);
@@ -936,39 +1006,20 @@ void main() {
 	//accumulation preperation:
 	float finalDensityDistance = min(traveledDistance, highestDensityDistance);
 	vec3 worldFinalPos = rayOrigin + raydirection * traveledDistance;
-	vec3 delta = rayOrigin - scene_data_block.prev_data.main_cam_inv_view_matrix[3].xyz;
+	// 重投影改用 GD 端自建的上一幀相機資料：scene_data 的 prev_data 在部分版本
+	// 不會確實填入，歷史幀會貼著螢幕跑（鏡頭一轉雲就破碎拖影）。
+	// 平移仍刻意加回 delta（雲視為極遠，平移視差忽略），只校正旋轉
+	vec3 delta = rayOrigin - genericData.data.prevCameraOrigin.xyz;
 	worldFinalPos += delta;
-	
-	vec4 reprojectedScreenPos = vec4(0.0);
 
-	#if ((GODOT_VERSION_MAJOR == 4) && (GODOT_VERSION_MINOR == 4)) || ((GODOT_VERSION_MAJOR == 4) && (GODOT_VERSION_MINOR == 5))
+	vec4 reprojectedClipPos = genericData.data.prevViewMatrix * vec4(worldFinalPos, 1.0);
 
-		//Prevview is already actually the inv_view (due to the way retrieving the transform works), so inversing it here is making it the equalivant of View_Matrix.
-		vec4 reprojectedClipPos = scene_data_block.prev_data.view_matrix * vec4(worldFinalPos, 1.0);
-		
-		reprojectedClipPos.z -= 0.01;
-		if (reprojectedClipPos.z > 0.0){
-			override = true;
-		}
-		
-		reprojectedScreenPos = scene_data_block.prev_data.projection_matrix * reprojectedClipPos;
-	#else
-		mat4 view_matrix = transpose(mat4(
-			scene_data_block.prev_data.view_matrix[0], 
-			scene_data_block.prev_data.view_matrix[1], 
-			scene_data_block.prev_data.view_matrix[2], 
-			vec4(0.0, 0.0, 0.0, 1.0)));
+	reprojectedClipPos.z -= 0.01;
+	if (reprojectedClipPos.z > 0.0){
+		override = true;
+	}
 
-		//Prevview is already actually the inv_view (due to the way retrieving the transform works), so inversing it here is making it the equalivant of View_Matrix.
-		vec4 reprojectedClipPos = view_matrix * vec4(worldFinalPos, 1.0);
-		
-		reprojectedClipPos.z -= 0.01;
-		if (reprojectedClipPos.z > 0.0){
-			override = true;
-		}
-		
-		reprojectedScreenPos = scene_data_block.prev_data.projection_matrix * reprojectedClipPos;
-	#endif
+	vec4 reprojectedScreenPos = genericData.data.prevProjectionMatrix * reprojectedClipPos;
 
 	// Convert clip space to normalized device coordinates
 	ndc = (reprojectedScreenPos.xy / reprojectedScreenPos.w);
@@ -978,9 +1029,8 @@ void main() {
 	//screen_position = clamp(screen_position, vec2(0.0), vec2(1.0));
 	screen_position = screen_position - depthUV;
 
-	ivec2 adjustedUV = ivec2(int(screen_position.x * size.x), int(screen_position.y * size.y));
-	//float change = length(vec2(adjustedUV));
-	adjustedUV += uv; //Size is the screen resolution.
+	// 四捨五入取代向零截斷：負向偏移不再有 1 像素的系統性偏差（旋轉時歷史漂移的來源之一）
+	ivec2 adjustedUV = uv + ivec2(round(screen_position * vec2(size)));
 	
 	ivec2 clampedUV = clamp(adjustedUV, ivec2(0), size - ivec2(1)); //having two lets me check if clamping it changed the reprojected uv, if it did that means it was offscreen, so rebuild data.
 

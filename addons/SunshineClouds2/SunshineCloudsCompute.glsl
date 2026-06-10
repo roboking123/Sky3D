@@ -8,6 +8,9 @@
 // Invocations in the (x, y, z) dimension
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+// 鄰域夾取用：當幀行進結果的群組內共享暫存（8×8 圖塊，每群組 1KB）
+shared vec4 tileColor[8][8];
+
 layout(rgba16f, binding = 0) uniform image2D output_data_image;
 layout(rgba16f, binding = 1) uniform image2D output_color_image;
 
@@ -507,9 +510,10 @@ void main() {
 	ivec2 size = ivec2(genericData.data.raster_size);
 
 	// Prevent reading/writing out of bounds.
-	if (uv.x >= size.x || uv.y >= size.y) {
-		return;
-	}
+	// 邊界外執行緒不提前 return：鄰域夾取的 barrier 需要全群組一致到達。
+	// 座標夾回有效範圍照常計算（重複算最後一格的結果），barrier 之後才丟棄、不寫回
+	bool inBounds = (uv.x < size.x && uv.y < size.y);
+	uv = min(uv, size - ivec2(1));
 	
 	vec2 depthUV = (uv + 0.5) / vec2(size);
 	float depth = texture(depth_image, depthUV).r;
@@ -1056,6 +1060,32 @@ void main() {
 	//lightColor.rgb = physicalFogColor;
 	// initialdistanceSample = max(initialdistanceSample, 0.0);
 
+	// ─── 鄰域夾取（TAA 式 AABB）────────────────────────────────────────
+	// 取當幀 3×3 鄰域的色彩極值盒。歷史色被夾進盒內後殘影無法存活，
+	// accumulation_decay 因此可以拉高（更長的時域窗），攤平薄雲邊緣的
+	// 抖動採樣方差（泡泡斑）與抖動序列的週期偏置（線香式搖晃）。
+	// barrier 安全：入口處已改為不提前 return，全群組一致到達此處
+	tileColor[gl_LocalInvocationID.y][gl_LocalInvocationID.x] = lightColor;
+	memoryBarrierShared();
+	barrier();
+	vec4 neighborMin = lightColor;
+	vec4 neighborMax = lightColor;
+	if (genericData.data.neighborhoodClampStrength > 0.0){
+		ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+		for (int oy = -1; oy <= 1; oy++){
+			for (int ox = -1; ox <= 1; ox++){
+				// 視窗夾在圖塊內：圖塊邊緣的盒略窄，可接受（標準 TAA 做法）
+				ivec2 nid = clamp(lid + ivec2(ox, oy), ivec2(0), ivec2(7));
+				vec4 c = tileColor[nid.y][nid.x];
+				neighborMin = min(neighborMin, c);
+				neighborMax = max(neighborMax, c);
+			}
+		}
+	}
+	if (!inBounds){
+		return;
+	}
+
 
 	//accumulation preperation:
 	float finalDensityDistance = min(traveledDistance, highestDensityDistance);
@@ -1116,6 +1146,13 @@ void main() {
 			currentDataAccumilation.b = finalDensityDistance;
 		}
 		else{
+			// 鄰域夾取：歷史色先夾進當幀鄰域極值盒（強度 0 時不動，位元級向後相容）。
+			// 放在自適應差異計算之前：夾過的歷史差異變小 → 歷史權重少被砍 → 窗更長
+			float clampStr = genericData.data.neighborhoodClampStrength;
+			if (clampStr > 0.0){
+				currentColorAccumilation = mix(currentColorAccumilation,
+					clamp(currentColorAccumilation, neighborMin, neighborMax), clampStr);
+			}
 			// 時域自適應：幀間差異大（雲緣移動／光照突變）時自動降低歷史權重，鬼影與噪點兼顧。
 			// 差異採「相對亮度差」：除以亮度正規化，避免亮部 HDR 的步進抖動噪聲被誤判成變化
 			// （絕對差會讓亮雲永久觸發快更新 → 時域去噪形同關閉 + 正回饋卡死）
@@ -1156,6 +1193,13 @@ void main() {
 			currentDataAccumilation.b = finalDensityDistance;
 		}
 		else{
+			// 鄰域夾取：歷史色先夾進當幀鄰域極值盒（強度 0 時不動，位元級向後相容）。
+			// 放在自適應差異計算之前：夾過的歷史差異變小 → 歷史權重少被砍 → 窗更長
+			float clampStr = genericData.data.neighborhoodClampStrength;
+			if (clampStr > 0.0){
+				currentColorAccumilation = mix(currentColorAccumilation,
+					clamp(currentColorAccumilation, neighborMin, neighborMax), clampStr);
+			}
 			// 時域自適應：幀間差異大（雲緣移動／光照突變）時自動降低歷史權重，鬼影與噪點兼顧。
 			// 差異採「相對亮度差」：除以亮度正規化，避免亮部 HDR 的步進抖動噪聲被誤判成變化
 			// （絕對差會讓亮雲永久觸發快更新 → 時域去噪形同關閉 + 正回饋卡死）

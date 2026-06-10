@@ -26,6 +26,9 @@ layout(binding = 8, std140) uniform SceneDataBlock {
 	SceneData prev_data;
 } scene_data_block;
 
+// 天氣圖（雲影投地與體積光柱用）
+layout(binding = 9) uniform sampler2D extra_large_noise;
+
 
 // Helpers
 float remap(float value, float min1, float max1, float min2, float max2) {
@@ -167,6 +170,52 @@ vec4 radialBlurData(vec4 startColor, float linear_depth, sampler2D image, vec2 u
     return Color;
 }
 
+// 天氣圖演化用 2D 雜湊（與主 compute 的 weatherHash 同邏輯，繫結各自宣告所以各自定義）
+vec2 weatherHashPost(float n) {
+	return fract(sin(vec2(n * 12.9898, n * 78.233)) * 43758.5453) - 0.5;
+}
+
+// 天氣圖演化取樣（與主 compute 的 sampleWeatherMap 同邏輯，保持雲影與雲本體同步演化）
+vec4 sampleWeatherMapPost(vec2 uv) {
+	float phase = genericData.data.weatherEvolvePhase;
+	if (phase <= 0.0) {
+		return texture(extra_large_noise, uv);
+	}
+	float weightA = abs(fract(phase) * 2.0 - 1.0);
+	vec4 sampleA = texture(extra_large_noise, uv + weatherHashPost(floor(phase + 0.5)));
+	vec4 sampleB = texture(extra_large_noise, uv + weatherHashPost(floor(phase) + 777.77));
+	return mix(sampleB, sampleA, weightA);
+}
+
+// 雲影透射率：從世界點沿太陽方向穿過雲層，用天氣圖近似光學深度。
+// 只取大尺度覆蓋（不含 3D 噪聲細節）→ 天然的軟邊大雲影，正是 AAA 雲影的質感
+float cloudShadowTransmittance(vec3 worldPos, vec3 sunDir) {
+	if (sunDir.y <= 0.02) {
+		return 1.0;
+	}
+	float cloudfloor = genericData.data.cloud_floor;
+	float cloudceiling = genericData.data.cloud_ceiling;
+	if (worldPos.y >= cloudceiling) {
+		return 1.0;
+	}
+	float tEnter = (max(cloudfloor, worldPos.y) - worldPos.y) / sunDir.y;
+	float tExit = (cloudceiling - worldPos.y) / sunDir.y;
+	float coverage = genericData.data.cloud_coverage * 1.01;
+	float tau = 0.0;
+	for (int i = 0; i < 3; i++) {
+		vec3 samplePos = worldPos + sunDir * mix(tEnter, tExit, (float(i) + 0.5) / 3.0);
+		vec2 weatherUV = (samplePos.xz - genericData.data.extralargenoiseposition.xz) / genericData.data.extralargenoisescale;
+		float coverageSample = sampleWeatherMapPost(weatherUV).a;
+		// 與主 shader 同款覆蓋率映射；3D 噪聲以平均值 0.6 近似、smoothstep 範圍放寬換軟邊
+		tau += smoothstep(coverage, coverage - 0.25, 1.0 - coverageSample * 0.6);
+	}
+	tau /= 3.0;
+	// 仰角連續淡出（必須放在函數內：呼叫端的 sunUp 權重會被 shadowAccum/shadowWeightSum
+	// 正規化約掉，在那裡淡出無效）。與開頭的提前返回在 0.02 處連續銜接，日出日落無跳變
+	float elevationFade = smoothstep(0.02, 0.1, sunDir.y);
+	return mix(1.0, exp(-tau * (1.0 + genericData.data.cloud_density * 4.0)), elevationFade);
+}
+
 void sampleAtmospherics(
 	vec3 curPos,
 	float atmosphericHeight,
@@ -177,6 +226,7 @@ void sampleAtmospherics(
 	float MieScatteringCoef,
 	float atmosphericDensity,
 	float density,
+	float sunVisibility,
 	inout vec3 totalRlh,
 	inout vec3 totalMie,
 	inout float iOdRlh,
@@ -190,7 +240,8 @@ void sampleAtmospherics(
 
 	vec3 attn = exp(-(MieScatteringCoef * (iOdMie + Miescaleheight) + RayleighScatteringCoef * (iOdRlh + Rayleighscaleheight))) * atmosphericDensity * (1.0 - clamp(iHeight, 0.0, 1.0));
 	totalRlh += odStepRlh * attn * (1.0 - density);
-	totalMie += odStepMie * attn * (1.0 - density);
+	// 太陽前向散射（Mie）吃雲影可見度 → 雲隙漏光形成體積光柱
+	totalMie += odStepMie * attn * (1.0 - density) * sunVisibility;
 }
 
 vec4 sampleAllAtmospherics(
@@ -232,6 +283,7 @@ vec4 sampleAllAtmospherics(
 	//bool sampledDistanceAtmo = false;
 	float currentWeight = 0.0;
 	float sampleCount = 0.0;
+	float shaftShadow = 1.0;
 
 	for (float i = 0.0; i < stepCount; i++) {
 		traveledDistance = stepDistance * (i + 1);
@@ -241,14 +293,19 @@ vec4 sampleAllAtmospherics(
 		if (traveledDistance > linear_depth || currentWeight >= 1.0){
 			traveledDistance = traveledDistance - stepDistance;
 			currentWeight = 1.0 - clamp((linear_depth - traveledDistance) / stepDistance, 0.0, 1.0);
-			sampleAtmospherics(curPos, atmosphericHeight, stepDistance, Rayleighscaleheight, Miescaleheight, RayleighScatteringCoef, MieScatteringCoef, atmosphericDensity, currentWeight, totalRlh, totalMie, iOdRlh, iOdMie);
+			sampleAtmospherics(curPos, atmosphericHeight, stepDistance, Rayleighscaleheight, Miescaleheight, RayleighScatteringCoef, MieScatteringCoef, atmosphericDensity, currentWeight, shaftShadow, totalRlh, totalMie, iOdRlh, iOdMie);
 			break;
 		}
 		sampleCount += 1.0;
 
 		curPos = worldPos + rayDirection * traveledDistance;
 
-		sampleAtmospherics(curPos, atmosphericHeight, stepDistance, Rayleighscaleheight, Miescaleheight, RayleighScatteringCoef, MieScatteringCoef, atmosphericDensity, currentWeight, totalRlh, totalMie, iOdRlh, iOdMie);
+		// 體積光柱：本步的太陽可見度 = 沿太陽方向的雲影透射率（strength = 0 時恆為 1，位元級不變）
+		if (genericData.data.sunShaftStrength > 0.0){
+			shaftShadow = mix(1.0, cloudShadowTransmittance(curPos, sunDirection), genericData.data.sunShaftStrength);
+		}
+
+		sampleAtmospherics(curPos, atmosphericHeight, stepDistance, Rayleighscaleheight, Miescaleheight, RayleighScatteringCoef, MieScatteringCoef, atmosphericDensity, currentWeight, shaftShadow, totalRlh, totalMie, iOdRlh, iOdMie);
 	}
 
 	// pRlh *= (1.0 - lightingWeight);
@@ -353,6 +410,28 @@ void main() {
 		vec3 ambientfogdistancecolor = genericData.data.ambientfogdistancecolor.rgb * genericData.data.ambientfogdistancecolor.a;
 		float atmosphericDensity = genericData.data.atmospheric_density;
 		float directionalLightCount = genericData.data.directionalLightsCount;
+
+		// 雲影投地：不透明像素沿太陽方向查雲層透射率，把場景色壓暗。
+		// 螢幕空間實作，免改任何地面材質；放在霧合成前，霧本身保持受光
+		if (genericData.data.cloudShadowStrength > 0.0 && linear_depth < scene_data_block.data.z_far){
+			vec3 pixelWorldPos = rayOrigin + raydirection * linear_depth;
+			float shadowAccum = 0.0;
+			float shadowWeightSum = 0.0;
+			for (float li = 0.0; li < directionalLightCount; li++){
+				DirectionalLight shadowLight = directionalLights[int(li)];
+				float sunUp = smoothstep(0.0, 0.2, shadowLight.direction.y);
+				float lightWeight = sunUp * shadowLight.color.a;
+				if (lightWeight <= 0.0){
+					continue;
+				}
+				shadowAccum += cloudShadowTransmittance(pixelWorldPos, shadowLight.direction.xyz) * lightWeight;
+				shadowWeightSum += lightWeight;
+			}
+			if (shadowWeightSum > 0.0){
+				float shadowTransmittance = shadowAccum / shadowWeightSum;
+				color.rgb *= mix(1.0, shadowTransmittance, genericData.data.cloudShadowStrength);
+			}
+		}
 
         vec3 physicalFogColor = color.rgb;
         float fogweight = 0.0;

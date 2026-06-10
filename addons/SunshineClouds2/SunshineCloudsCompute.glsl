@@ -163,6 +163,23 @@ vec4 sampleWeatherMap(vec2 uv) {
 	return mix(sampleB, sampleA, weightA);
 }
 
+// 雲種垂直剖面（Nubis 風格雲種語言）：type 0→0.5→1 對應
+// 層雲（扁平低矮）→ 積雲（蓬鬆中層）→ 積雨雲（高聳塔狀）
+float cloudTypeProfile(float height01, float type01) {
+	float stratus = smoothstep(0.0, 0.08, height01) * smoothstep(0.30, 0.12, height01);
+	float cumulus = smoothstep(0.0, 0.12, height01) * smoothstep(0.65, 0.35, height01);
+	float cumulonimbus = smoothstep(0.0, 0.10, height01) * smoothstep(1.0, 0.70, height01);
+	float profile = mix(stratus, cumulus, clamp(type01 * 2.0, 0.0, 1.0));
+	return mix(profile, cumulonimbus, clamp(type01 * 2.0 - 1.0, 0.0, 1.0));
+}
+
+// 取雲種值：天氣圖在去相關 UV 上的低頻取樣（與覆蓋率脫鉤）+ 全域偏置（天氣系統驅動）
+float sampleCloudType(vec2 worldXZ) {
+	vec2 uv = (worldXZ - genericData.data.extralargenoiseposition.xz) / genericData.data.extralargenoisescale;
+	float type01 = sampleWeatherMap(uv * 0.37 + vec2(0.41, 0.17)).a;
+	return clamp(type01 + genericData.data.cloudTypeBias, 0.0, 1.0);
+}
+
 bool renderBayer(ivec2 fragCoord, int framecount)
 {
 	//int BAYER = 16;
@@ -231,6 +248,12 @@ float sampleScene(
 		}
 	}
 
+	// 雲種系統：依天氣圖選擇垂直剖面，重塑高度包絡（variation = 0 時位元級不變）
+	if (genericData.data.cloudTypeVariation > 0.0){
+		float typeProfile = cloudTypeProfile(clampedWorldHeight, sampleCloudType(worldPosition.xz));
+		gradientSample.r *= mix(1.0, typeProfile, genericData.data.cloudTypeVariation);
+	}
+
 	float largeShape = texture(large_noise, (worldPosition - largeNoisePos) / largenoisescale).r * extraLargeShape;
 	largeShape = smoothstep(coverage , coverage - 0.1, 1.0 - (largeShape * gradientSample.r)) + max(effectorAdditive, 0.0);
 	vec4 mediumShapes = texture(noise_medium, (worldPosition - mediumNoisePos) / mediumnoisescale).rgba;
@@ -268,6 +291,14 @@ float sampleSceneCoarse(
 
 	if (lod > 0.0){
 		effectorAdditive = sampleEffectorAdditive(worldPosition) * edgeFade;
+	}
+
+	// 雲種系統：只在 curl 不會啟動的區域（遠景／低 LOD）套用剖面。
+	// curl 啟動時 sampleScene 的取樣位置被大幅位移、剖面取值點不一致，
+	// 這裡保持不乘 → 粗值維持上界，空步跳躍閘門不會誤刪雲頂塔狀結構
+	if (genericData.data.cloudTypeVariation > 0.0 && min(genericData.data.curlPower, lod) <= 0.5){
+		float typeProfile = cloudTypeProfile(clampedWorldHeight, sampleCloudType(worldPosition.xz));
+		gradientSample.r *= mix(1.0, typeProfile, genericData.data.cloudTypeVariation);
 	}
 
 	float largeShape = texture(large_noise, (worldPosition - largeNoisePos) / largenoisescale).r * extraLargeShape;
@@ -319,18 +350,22 @@ float sampleLighting(
 	for (float i = 0.0; i < stepCountFloat; i++) {
 		traveledDistance = mix(eachShortStep, actualDistance, clamp(quadraticOut(i / stepCountFloat), 0.0, 1.0));
 		curPos = worldPosition + sunDirection * traveledDistance;
-		// 錐形取樣：沿太陽方向張開錐形抖動採樣點（0 = 維持直線行進）
+		// 錐形取樣：偏移只用於「密度取樣位置」；層內判定與高度梯度用未偏移的直線位置，
+		// 否則錐形抖動會把「出層即 break」的單調條件變成非單調——雲頂/底的打光被一個
+		// 出層樣本提前砍斷（tau 低估 → 雲緣偏亮 + 鏡頭移動時打光閃爍）
+		vec3 conePos = curPos;
 		if (coneSpread > 0.0){
-			curPos += CONE_KERNEL[int(mod(i, 6.0))] * traveledDistance * coneSpread;
+			conePos += CONE_KERNEL[int(mod(i, 6.0))] * traveledDistance * coneSpread;
+			conePos.y = clamp(conePos.y, cloudfloor, cloudceiling);
 		}
 
 		if (density < 1.0 && clamp(curPos.y, cloudfloor, cloudceiling) == curPos.y){
 			heightGradient = remap(curPos.y, cloudfloor, cloudceiling, 0.0, 1.0);
 
 			heightGradient = clamp(smoothstep(sunUpValue - 0.1, sunUpValue, heightGradient), 0.0, 1.0);
-			float extraLargeShape = sampleWeatherMap((curPos.xz - extralargeNoisePos.xz) / extralargenoisescale).a;
+			float extraLargeShape = sampleWeatherMap((conePos.xz - extralargeNoisePos.xz) / extralargenoisescale).a;
 
-			thisDensity = sampleScene(largeNoisePos, mediumNoisePos, smallNoisePos, curPos, cloudceiling, cloudfloor, extraLargeShape, largenoisescale, mediumnoisescale, smallnoisescale, coverage, smallscalePower, curlPower, lod, true) * densityMultiplier * eachStepWeight;
+			thisDensity = sampleScene(largeNoisePos, mediumNoisePos, smallNoisePos, conePos, cloudceiling, cloudfloor, extraLargeShape, largenoisescale, mediumnoisescale, smallnoisescale, coverage, smallscalePower, curlPower, lod, true) * densityMultiplier * eachStepWeight;
 			// if (thisDensity <= 0.0){
 			// 	break;
 			// }
@@ -716,6 +751,9 @@ void main() {
 	float depthFade = 1.0;
 	float newdensity = 0.0;
 	vec3 curPos = vec3(0.0);
+	// 環境光垂直梯度用：密度加權的平均高度
+	float heightSum = 0.0;
+	float heightWeightSum = 0.0;
 	
 	float curLod = 1.0;
 	float samplePosCount = genericData.data.samplePointsCount;
@@ -780,6 +818,8 @@ void main() {
 
 				paintedColor += maskSample.rgb;
 				lightingSamples += 1.0;
+				heightSum += clamp(remap(curPos.y, cloudfloor, cloudceiling, 0.0, 1.0), 0.0, 1.0) * newdensity;
+				heightWeightSum += newdensity;
 				// 前向遮蔽權重：視線上已累積的雲，遮蔽後方步進的入射光（由前往後能量守恆）
 				float occlusionWeight = 1.0 - clamp(density, 0.0, 1.0);
 				// 能量守恆積分：散射貢獻按本步不透明度加權，總亮度與步數脫鉤（增益旋鈕補償量級）
@@ -787,10 +827,11 @@ void main() {
 				if (genericData.data.energyConserving > 0.5){
 					integrationWeight = clamp(newdensity, 0.0, 1.0) * genericData.data.scatterEnergyGain;
 				}
-				// 打光重用：與上一個打光點距離夠近且密度相近時，直接重用快取的光學深度（約省一半打光成本）
+				// 打光重用：與上一個打光點距離夠近且密度相近時，直接重用快取的光學深度（約省一半打光成本）。
+				// 密度門檻取相對值：絕對門檻在低密度設定（clouds_density ~0.14）下形同虛設
 				bool reuseLighting = genericData.data.lightSampleReuse > 0.5
 					&& (traveledDistance - lastLightSampleDistance) < minstep * 2.0
-					&& abs(newdensity - lastLightSampleDensity) < 0.1;
+					&& abs(newdensity - lastLightSampleDensity) < newdensity * 0.3 + 0.005;
 				for (int lightI = 0; lightI < directionalLightCount; lightI++){
 					vec3 sundir = directionalLights[lightI].direction.xyz;
 					float sunUpWeight = directionalLightSunUpPower[lightI].r;
@@ -920,6 +961,11 @@ void main() {
 
 				
 				newStep = mix(mix(maxstep, minstep, pow(newdensity, 0.1)), maxstep, float(i) / float(stepCount));
+				// 穿雲近場細化：相機在雲層內時，近距步進加密，機身周圍雲團不糊
+				if (genericData.data.nearFlightRefinement > 0.0 && clamp(rayOrigin.y, cloudfloor, cloudceiling) == rayOrigin.y){
+					float proximity01 = 1.0 - clamp(traveledDistance / (maxstep * 16.0), 0.0, 1.0);
+					newStep *= mix(1.0, 0.35, proximity01 * genericData.data.nearFlightRefinement);
+				}
 				if (newdensity > highestDensity){
 					highestDensity = newdensity;
 					highestDensityDistance = traveledDistance;
@@ -973,6 +1019,11 @@ void main() {
 
 	vec3 ambientLight = genericData.data.ambientLightColor.rgb * totalLightPower;
 	ambientLight = mix(ambientLight, ambientLight * aobase.rgb, ambient * aobase.a) * paintedColor;
+	// 環境光垂直梯度：雲底偏向 AO 色（地平線／地面反彈側），雲頂保持天頂色 → 暗面有色溫層次
+	if (genericData.data.ambientHeightGradient > 0.0 && heightWeightSum > 0.0){
+		float avgHeight01 = clamp(heightSum / heightWeightSum, 0.0, 1.0);
+		ambientLight = mix(ambientLight, ambientLight * aobase.rgb, (1.0 - avgHeight01) * genericData.data.ambientHeightGradient);
+	}
 	lightColor.rgb += ambientLight;
 	// lightColor.rgb = ambientLight + clamp(lightColor.rgb / lightingSamples, vec3(0.0), vec3(1.0));
 	lightColor.a = density;
@@ -999,6 +1050,9 @@ void main() {
 
 
 	lightColor.rgb = mix(physicalFogColor, mix(lightColor.rgb, ambientfogdistancecolor, fogweight),  genericData.data.atmosphere_simple_blend);
+	// 曝光鉤子：接 HDR／自動曝光管線時的 EV 增益（0 = 乘 1，不動）。
+	// 放在霧合成「之後」，雲與大氣霧同步曝光，遠景不會稀釋增益
+	lightColor.rgb *= exp2(genericData.data.cloudExposureEV);
 	//lightColor.rgb = physicalFogColor;
 	// initialdistanceSample = max(initialdistanceSample, 0.0);
 
@@ -1062,11 +1116,21 @@ void main() {
 			currentDataAccumilation.b = finalDensityDistance;
 		}
 		else{
-			currentColorAccumilation = (currentColorAccumilation * accumdecay) + lightColor * (1.0 - accumdecay);
+			// 時域自適應：幀間差異大（雲緣移動／光照突變）時自動降低歷史權重，鬼影與噪點兼顧。
+			// 差異採「相對亮度差」：除以亮度正規化，避免亮部 HDR 的步進抖動噪聲被誤判成變化
+			// （絕對差會讓亮雲永久觸發快更新 → 時域去噪形同關閉 + 正回饋卡死）
+			float adaptiveDecay = accumdecay;
+			if (genericData.data.temporalResponsiveness > 0.0){
+				float lumaHistory = dot(currentColorAccumilation.rgb, vec3(0.299, 0.587, 0.114));
+				float lumaCurrent = dot(lightColor.rgb, vec3(0.299, 0.587, 0.114));
+				float frameDelta = length(currentColorAccumilation.rgb - lightColor.rgb) / (max(lumaHistory, lumaCurrent) + 0.05) + abs(currentColorAccumilation.a - lightColor.a);
+				adaptiveDecay = mix(accumdecay, accumdecay * 0.5, clamp(frameDelta * genericData.data.temporalResponsiveness, 0.0, 1.0));
+			}
+			currentColorAccumilation = (currentColorAccumilation * adaptiveDecay) + lightColor * (1.0 - adaptiveDecay);
 
-			currentDataAccumilation.r = mix(currentDataAccumilation.r, initialdistanceSample, (1.0 - accumdecay));
-			currentDataAccumilation.g = mix(currentDataAccumilation.g, traveledDistance,  (1.0 - accumdecay));
-			currentDataAccumilation.b = mix(currentDataAccumilation.b, finalDensityDistance,  (1.0 - accumdecay));
+			currentDataAccumilation.r = mix(currentDataAccumilation.r, initialdistanceSample, (1.0 - adaptiveDecay));
+			currentDataAccumilation.g = mix(currentDataAccumilation.g, traveledDistance,  (1.0 - adaptiveDecay));
+			currentDataAccumilation.b = mix(currentDataAccumilation.b, finalDensityDistance,  (1.0 - adaptiveDecay));
 		}
 
 		currentDataAccumilation.a = currentDepthBreak;
@@ -1092,11 +1156,21 @@ void main() {
 			currentDataAccumilation.b = finalDensityDistance;
 		}
 		else{
-			currentColorAccumilation = (currentColorAccumilation * accumdecay) + lightColor * (1.0 - accumdecay);
+			// 時域自適應：幀間差異大（雲緣移動／光照突變）時自動降低歷史權重，鬼影與噪點兼顧。
+			// 差異採「相對亮度差」：除以亮度正規化，避免亮部 HDR 的步進抖動噪聲被誤判成變化
+			// （絕對差會讓亮雲永久觸發快更新 → 時域去噪形同關閉 + 正回饋卡死）
+			float adaptiveDecay = accumdecay;
+			if (genericData.data.temporalResponsiveness > 0.0){
+				float lumaHistory = dot(currentColorAccumilation.rgb, vec3(0.299, 0.587, 0.114));
+				float lumaCurrent = dot(lightColor.rgb, vec3(0.299, 0.587, 0.114));
+				float frameDelta = length(currentColorAccumilation.rgb - lightColor.rgb) / (max(lumaHistory, lumaCurrent) + 0.05) + abs(currentColorAccumilation.a - lightColor.a);
+				adaptiveDecay = mix(accumdecay, accumdecay * 0.5, clamp(frameDelta * genericData.data.temporalResponsiveness, 0.0, 1.0));
+			}
+			currentColorAccumilation = (currentColorAccumilation * adaptiveDecay) + lightColor * (1.0 - adaptiveDecay);
 
-			currentDataAccumilation.r = mix(currentDataAccumilation.r, initialdistanceSample, (1.0 - accumdecay));
-			currentDataAccumilation.g = mix(currentDataAccumilation.g, traveledDistance,  (1.0 - accumdecay));
-			currentDataAccumilation.b = mix(currentDataAccumilation.b, finalDensityDistance,  (1.0 - accumdecay));
+			currentDataAccumilation.r = mix(currentDataAccumilation.r, initialdistanceSample, (1.0 - adaptiveDecay));
+			currentDataAccumilation.g = mix(currentDataAccumilation.g, traveledDistance,  (1.0 - adaptiveDecay));
+			currentDataAccumilation.b = mix(currentDataAccumilation.b, finalDensityDistance,  (1.0 - adaptiveDecay));
 		}
 
 		currentDataAccumilation.a = currentDepthBreak;

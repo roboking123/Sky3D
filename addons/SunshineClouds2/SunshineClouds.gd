@@ -65,6 +65,12 @@ class_name SunshineCloudsGD
 @export_range(0, 1000) var dither_speed : float = 15.111
 @export_range(0, 20) var blur_power : float = 2.0
 @export_range(0, 6) var blur_quality : float = 1.0
+## 環境光垂直梯度：雲底偏向 AO 色（地面反彈／地平線），雲頂保持天頂色，暗面有色溫層次（0 = 關）
+@export_range(0, 1) var ambient_height_gradient : float = 0.0
+## 雲輻射曝光補償（EV）：接 HDR／自動曝光管線時的增益鉤子，0 = 不動
+@export_range(-4, 4) var cloud_exposure_ev : float = 0.0
+## 時域自適應響應：幀間差異大時自動加快歷史更新，動雲不拖影、靜雲不噪（0 = 純指數混合）
+@export_range(0, 10) var temporal_responsiveness : float = 0.0
 
 @export_subgroup("Reflections")
 @export var reflections_globalshaderparam : String = ""
@@ -99,6 +105,19 @@ class_name SunshineCloudsGD
 ## 天氣圖演化速度（相位/秒）：>0 時覆蓋圖案會隨時間無縫變形重組（不只隨風平移）。建議 0.002~0.02
 @export_range(0, 0.1, 0.001) var weather_evolution_speed : float = 0.0
 
+@export_subgroup("Cloud Types")
+## 雲種變化強度：0 = 關閉（單一雲種），1 = 完全依天氣圖分布雲種
+## （層雲扁平／積雲蓬鬆／積雨雲高聳的垂直剖面語言）
+@export_range(0, 1) var cloud_type_variation : float = 0.0
+## 雲種偏置：-1 全面偏向扁平層雲，+1 全面偏向高聳積雨雲（天氣系統會驅動這個值）
+@export_range(-1, 1) var cloud_type_bias : float = 0.0
+
+@export_subgroup("Ground Effects")
+## 雲影投地強度：螢幕空間沿太陽方向查雲層，地面有雲影飄過（0 = 關）
+@export_range(0, 1) var cloud_ground_shadows : float = 0.0
+## 體積光柱強度：大氣內散射吃雲影，雲隙漏光形成光柱（0 = 關）
+@export_range(0, 1) var sun_shaft_strength : float = 0.0
+
 @export_subgroup("Performance")
 @export var min_step_distance : float = 400.0
 @export var max_step_distance : float = 500.0
@@ -106,6 +125,8 @@ class_name SunshineCloudsGD
 ## 空步跳躍：空域先用便宜的粗取樣當閘門再決定要不要做完整取樣（晴朗天空大幅省採樣）。
 ## 若雲頂出現邊緣裁切就關掉
 @export var empty_space_skip : bool = false
+## 穿雲近場細化：相機在雲層內時近距步進加密，機身周圍雲團不糊（0 = 關，1 = 最密）
+@export_range(0, 1) var near_flight_refinement : float = 0.0
 
 @export_subgroup("Mask")
 @export var extra_large_used_as_mask : bool = false
@@ -539,7 +560,7 @@ func _render_callback(effect_callback_type, render_data):
 					#reflections
 					accumulation_textures.append(rd.texture_create(base_colorformat, RDTextureView.new(), [blankImageData]))
 					
-					general_data_buffer = rd.uniform_buffer_create(464)
+					general_data_buffer = rd.uniform_buffer_create(496)
 					
 					var depthformat : RDTextureFormat = rd.texture_get_format(depth_image)
 					depthformat.width = new_size.x
@@ -764,7 +785,15 @@ func _render_callback(effect_callback_type, render_data):
 					postpass_camera_data_uniform.binding = 8
 					postpass_camera_data_uniform.add_id(cameraData)
 					postpass_uniforms_array.append(postpass_camera_data_uniform)
-					
+
+					# 天氣圖（雲影投地與體積光柱用），與主 pass binding 7 同一來源
+					var postpass_weather_uniform = RDUniform.new()
+					postpass_weather_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+					postpass_weather_uniform.binding = 9
+					postpass_weather_uniform.add_id(linear_sampler)
+					postpass_weather_uniform.add_id(maskDrawnRid if extra_large_used_as_mask && maskDrawnRid.is_valid() else RenderingServer.texture_get_rd_texture(extra_large_noise_patterns.get_rid()))
+					postpass_uniforms_array.append(postpass_weather_uniform)
+
 					uniform_sets.append(rd.uniform_set_create(postpass_uniforms_array, postpass_shader, 0))
 					#endregion
 
@@ -878,8 +907,8 @@ func retrieve_position_queries(data : PackedByteArray):
 			#self.effect_callback_type = CompositorEffect.EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT
 
 func update_matrices(camera_tr, view_proj, new_size: Vector2i):
-	if general_data.size() != 464: #116 * 4 bytes for each float = 464（含 2 個 mat4 + 1 個 vec4 的上一幀相機資料）.
-		general_data.resize(464)
+	if general_data.size() != 496: #124 * 4 bytes for each float = 496（含 2 個 mat4 + 1 個 vec4 的上一幀相機資料）.
+		general_data.resize(496)
 	
 	var idx = 0
 	filter_index += 1
@@ -1031,7 +1060,7 @@ func update_matrices(camera_tr, view_proj, new_size: Vector2i):
 	general_data.encode_float(idx, lod_bias); idx += 4
 
 	general_data.encode_float(idx, clouds_sharpness); idx += 4
-	general_data.encode_float(idx, float(directional_lights_data.size()) / 2.0); idx += 4
+	general_data.encode_float(idx, minf(float(directional_lights_data.size()) / 2.0, 4.0)); idx += 4 # shader 端陣列上限 4 盞
 	general_data.encode_float(idx, clouds_powder); idx += 4
 	general_data.encode_float(idx, clouds_anisotropy); idx += 4
 
@@ -1050,8 +1079,8 @@ func update_matrices(camera_tr, view_proj, new_size: Vector2i):
 	general_data.encode_float(idx, fog_effect_ground); idx += 4
 	general_data.encode_float(idx, positionQueries.size()); idx += 4
 	
-	general_data.encode_float(idx, float(point_lights_data.size()) / 2.0); idx += 4
-	general_data.encode_float(idx, float(point_effector_data.size()) / 2.0); idx += 4
+	general_data.encode_float(idx, minf(float(point_lights_data.size()) / 2.0, 128.0)); idx += 4 # shader 端陣列上限 128 盞
+	general_data.encode_float(idx, minf(float(point_effector_data.size()) / 2.0, 64.0)); idx += 4 # shader 端陣列上限 64 個
 	general_data.encode_float(idx, wind_swept_range); idx += 4
 	general_data.encode_float(idx, wind_swept_strength); idx += 4
 	
@@ -1074,7 +1103,8 @@ func update_matrices(camera_tr, view_proj, new_size: Vector2i):
 	
 	general_data.encode_float(idx, int(pow(2.0, float(resolution_scale)))); idx += 4
 
-	# 進階散射參數（對應 CloudsInc.comp GenericData 尾端 8 個 float）
+	# 第一批進階散射參數。注意：此處到函數尾端的 encode 順序是與
+	# CloudsInc.comp GenericData 欄位順序的「位置對應合約」，插欄位必須兩邊同步
 	general_data.encode_float(idx, 1.0 if use_advanced_scattering else 0.0); idx += 4
 	general_data.encode_float(idx, float(multi_scatter_octaves)); idx += 4
 	general_data.encode_float(idx, multi_scatter_attenuation); idx += 4
@@ -1092,6 +1122,17 @@ func update_matrices(camera_tr, view_proj, new_size: Vector2i):
 	general_data.encode_float(idx, 1.0 if energy_conserving_integration else 0.0); idx += 4
 
 	general_data.encode_float(idx, weather_evolution_phase); idx += 4
+	general_data.encode_float(idx, ambient_height_gradient); idx += 4
+	general_data.encode_float(idx, cloud_ground_shadows); idx += 4
+	general_data.encode_float(idx, sun_shaft_strength); idx += 4
+
+	# 第三批進階參數：雲種系統、時域自適應、曝光鉤子、穿雲細化
+	general_data.encode_float(idx, cloud_type_variation); idx += 4
+	general_data.encode_float(idx, cloud_type_bias); idx += 4
+	general_data.encode_float(idx, temporal_responsiveness); idx += 4
+	general_data.encode_float(idx, cloud_exposure_ev); idx += 4
+
+	general_data.encode_float(idx, near_flight_refinement); idx += 4
 	general_data.encode_float(idx, 0.0); idx += 4 # reservedA
 	general_data.encode_float(idx, 0.0); idx += 4 # reservedB
 	general_data.encode_float(idx, 0.0); idx += 4 # reservedC

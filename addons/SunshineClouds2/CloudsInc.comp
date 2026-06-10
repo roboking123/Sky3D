@@ -320,6 +320,17 @@ struct GenericData{
 	float energyConserving;
 
 	float weatherEvolvePhase;
+	float ambientHeightGradient;	// 環境光垂直梯度強度（0 = 關）
+	float cloudShadowStrength;		// 雲影投地強度（0 = 關，後處理用）
+	float sunShaftStrength;			// 體積光柱強度（0 = 關，後處理用）
+
+	// 第三批進階參數：雲種系統、時域自適應、曝光鉤子、穿雲細化
+	float cloudTypeVariation;		// 雲種變化強度（0 = 關，單一雲種）
+	float cloudTypeBias;			// 雲種偏置：-1 偏層雲、+1 偏積雨雲
+	float temporalResponsiveness;	// 時域自適應響應（0 = 純指數混合）
+	float cloudExposureEV;			// 雲輻射曝光補償 EV（0 = 不動）
+
+	float nearFlightRefinement;		// 穿雲近場步進細化（0 = 關）
 	float reservedA;
 	float reservedB;
 	float reservedC;
